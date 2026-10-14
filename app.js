@@ -312,8 +312,7 @@ async function renderLibrary() {
   const docs = (await DB.all('docs')).sort((a, b) => b.updatedAt - a.updatedAt);
   $('#libCount').textContent = docs.length ? `${docs.length}件のドキュメント` : '';
   $('#libFilters').innerHTML = [`<button class="chip ${state.filter === 'all' ? 'on' : ''}" data-f="all">すべて</button>`]
-    .concat(CATS.map((c) => `<button class="chip ${state.filter === c.id ? 'on' : ''}" data-f="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.label)}</button>`))
-    .concat(`<button class="chip chip-edit" data-edit-tags>${icon('edit', 'sm')}タグを編集</button>`).join('');
+    .concat(CATS.map((c) => `<button class="chip ${state.filter === c.id ? 'on' : ''}" data-f="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.label)}</button>`)).join('');
   const q = norm($('#libSearch').value.trim());
   const list = docs.filter((d) => (state.filter === 'all' || d.category === state.filter) && (!q || norm(d.title).includes(q)));
   const el = $('#libList');
@@ -341,10 +340,7 @@ async function renderLibrary() {
     </button>`;
   }).join('')}</div>`;
 }
-$('#libFilters').addEventListener('click', (e) => {
-  if (e.target.closest('[data-edit-tags]')) { go('settings'); return; }
-  const b = e.target.closest('[data-f]'); if (b) { state.filter = b.dataset.f; renderLibrary(); }
-});
+$('#libFilters').addEventListener('click', (e) => { const b = e.target.closest('[data-f]'); if (b) { state.filter = b.dataset.f; renderLibrary(); } });
 $('#libSearch').addEventListener('input', () => renderLibrary());
 // 一覧をスクロールしたら、固定した見出し部分の下に区切り線を出す
 window.addEventListener('scroll', () => { $('#libSticky').classList.toggle('scrolled', state.screen === 'library' && window.scrollY > 4); }, { passive: true });
@@ -989,7 +985,7 @@ $('#tagAdd').addEventListener('click', async () => {
   CATS.push({ id: 't' + uid(), label: '新しいタグ', color });
   saveCats();
   await renderTags();
-  const inp = $('#tagList .tag-name').pop();
+  const inp = $$('#tagList .tag-name').pop();
   inp.focus(); inp.select();
 });
 
