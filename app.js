@@ -155,17 +155,9 @@ async function processPage(pageId) {
   const img = await loadImage(page.original);
   const src = drawScaled(img, img.naturalWidth, img.naturalHeight, 3200);
   const data = src.getContext('2d').getImageData(0, 0, src.width, src.height);
-  const r = await Proc.call(data, page.corners, { split: !!page.splitWith }, Number(S.maxSide), page.part || 0);
-  let out = canvasOf(r.width, r.height);
+  const r = await Proc.call(data, page.corners, { split: !!page.splitWith, rotation: page.rotation || 0 }, Number(S.maxSide), page.part || 0);
+  const out = canvasOf(r.width, r.height);
   out.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
-  const rot = ((page.rotation || 0) % 360 + 360) % 360;
-  if (rot) {
-    const rc = rot % 180 ? canvasOf(out.height, out.width) : canvasOf(out.width, out.height);
-    const ctx = rc.getContext('2d');
-    ctx.translate(rc.width / 2, rc.height / 2); ctx.rotate(rot * Math.PI / 180);
-    ctx.drawImage(out, -out.width / 2, -out.height / 2);
-    out = rc;
-  }
   const fresh = await DB.get('pages', pageId);
   if (!fresh) return;
   fresh.processed = await toBlob(out, Number(S.quality));
@@ -209,8 +201,8 @@ async function refreshDocCover(docId) {
   if (first && first.thumb && doc.cover !== first.thumb) { doc.cover = first.thumb; await DB.put('docs', doc); }
 }
 /* 1枚の元画像からページを作る(見開き分割なら2ページ) */
-async function addCapture(docId, blob, corners, split) {
-  const base = { docId, original: blob, corners: corners || FULL, rotation: 0, processed: null, thumb: null, status: 'pending', createdAt: Date.now() };
+async function addCapture(docId, blob, corners, split, rotation = 0) {
+  const base = { docId, original: blob, corners: corners || FULL, rotation, processed: null, thumb: null, status: 'pending', createdAt: Date.now() };
   const pages = [];
   if (split) {
     const a = { ...base, id: uid(), part: 0 }, b = { ...base, id: uid(), part: 1 };
@@ -347,7 +339,7 @@ async function renderLibrary() {
 $('#libFilters').addEventListener('click', (e) => { const b = e.target.closest('[data-f]'); if (b) { state.filter = b.dataset.f; renderLibrary(); } });
 $('#libSearch').addEventListener('input', () => renderLibrary());
 $('#libList').addEventListener('click', (e) => { const c = e.target.closest('.doc-card'); if (c) go('doc', { docId: c.dataset.id }); });
-$('#scanBtn').addEventListener('click', () => go('camera', { docId: null }));
+$('#scanBtn').addEventListener('click', () => { Tilt.request(); go('camera', { docId: null }); });
 $('#openSettings').addEventListener('click', () => go('settings'));
 let importTarget = null;
 $('#importBtn').addEventListener('click', () => { importTarget = null; $('#fileInput').click(); });
@@ -388,6 +380,44 @@ const Sound = {
     };
     burst(0, 0.03, 3400, 1.1);
     burst(0.075, 0.08, 1900, 0.9);
+  },
+};
+
+// ---------------- 端末の向き ----------------
+/* 撮影時の iPhone の傾き(重力の向き)から、ページを正しい向きにする回転角を決める。
+ * ほぼ水平に構えているときは向きが分からないので、直前の向きを使う。 */
+const Tilt = {
+  rot: 0, listening: false,
+  // iPhone ではボタンのタップ内で許可を求める必要がある
+  request() {
+    const start = () => {
+      if (this.listening) return;
+      this.listening = true;
+      window.addEventListener('deviceorientation', (e) => this.update(e));
+    };
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission().then((r) => { if (r === 'granted') start(); }).catch(() => {});
+      } else if (typeof DeviceOrientationEvent !== 'undefined') start();
+    } catch (_) { /* 使えない環境では回転しない */ }
+  },
+  update(e) {
+    if (e.beta == null || e.gamma == null) return;
+    const b = e.beta * Math.PI / 180, g = e.gamma * Math.PI / 180;
+    // 画面上で「上」に当たる方向(画面の右向きを x、上向きを y とした重力の反対向き)
+    const ux = -Math.sin(g) * Math.cos(b), uy = Math.sin(b);
+    if (Math.hypot(ux, uy) < 0.35) return; // 約20度未満の傾きは判断しない
+    // 今の向きから変えるのは、はっきり傾いたときだけ(境目でパタパタ変わらないように)
+    const cand = Math.abs(uy) >= Math.abs(ux) ? (uy > 0 ? 0 : 180) : (ux > 0 ? 270 : 90);
+    if (cand !== this.rot) {
+      const strong = Math.abs(uy) >= Math.abs(ux) ? Math.abs(uy) > Math.abs(ux) * 1.4 : Math.abs(ux) > Math.abs(uy) * 1.4;
+      if (strong) this.rot = cand;
+    }
+  },
+  // 画面自体が横向きに回っているときは、カメラ映像もすでに横向きなのでその分を差し引く
+  current() {
+    const so = screen.orientation && typeof screen.orientation.angle === 'number' ? screen.orientation.angle : ((window.orientation || 0) + 360) % 360;
+    return (this.rot + so) % 360;
   },
 };
 
@@ -548,10 +578,11 @@ const Cam = {
       const corners = this.quad ? this.quad.map((p) => [...p]) : FULL;
       const blob = await toBlob(c, 0.92);
       if (!this.docId) this.docId = (await createDoc(this.cat)).id;
-      const pages = await addCapture(this.docId, blob, corners, this.cat === 'book' && this.split);
+      const rot = Tilt.current();
+      const pages = await addCapture(this.docId, blob, corners, this.cat === 'book' && this.split, rot);
       this.count += pages.length;
       if (S.shutterSound) Sound.shutter();
-      this.updateThumb(c);
+      this.updateThumb(c, rot);
       this.status(auto ? '撮影しました ・ 次のページへ' : '撮影しました');
       this.armed = false; this.moved = false; this.stillSince = 0;
       // 少し待ってから次の自動撮影を受け付ける
@@ -561,13 +592,21 @@ const Cam = {
     }
     this.busy = false;
   },
-  updateThumb(canvas) {
+  updateThumb(canvas, rot = 0) {
     const t = $('#camThumb');
     $('b', t).textContent = this.count;
     t.classList.toggle('show', this.count > 0);
     $('#camDone').classList.toggle('show', this.count > 0);
     if (canvas) {
-      const small = drawScaled(canvas, canvas.width, canvas.height, 160);
+      let small = drawScaled(canvas, canvas.width, canvas.height, 160);
+      // 保存される向き(回転後)で小さく見せる
+      if (rot) {
+        const rc = rot % 180 ? canvasOf(small.height, small.width) : canvasOf(small.width, small.height);
+        const ctx = rc.getContext('2d');
+        ctx.translate(rc.width / 2, rc.height / 2); ctx.rotate(rot * Math.PI / 180);
+        ctx.drawImage(small, -small.width / 2, -small.height / 2);
+        small = rc;
+      }
       $('img', t).src = small.toDataURL('image/jpeg', 0.7);
       t.classList.remove('pop'); void t.offsetWidth; t.classList.add('pop');
     }
@@ -619,7 +658,7 @@ async function renderDoc() {
   }).join('') + `<button class="add-card" id="addPage"><div>${icon('camera', 'lg')}ページを追加</div></button>`;
 }
 $('#docPages').addEventListener('click', (e) => {
-  if (e.target.closest('#addPage')) { go('camera', { docId: state.docId }); return; }
+  if (e.target.closest('#addPage')) { Tilt.request(); go('camera', { docId: state.docId }); return; }
   const c = e.target.closest('.page-card'); if (c) go('edit', { pageId: c.dataset.id });
 });
 $('#docTitle').addEventListener('change', async (e) => {

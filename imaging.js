@@ -7,11 +7,16 @@
 
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-  function toGray(img) {
+  /* 「紙らしさ」: 明るく、色味が少ないほど高い。
+   * 明るい色柄の敷物やカラフルな背景を紙と取り違えないために、彩度(RGBの最大と最小の差)を差し引く。 */
+  function toPaperness(img) {
     const { data, width: w, height: h } = img;
     const g = new Float32Array(w * h);
     for (let i = 0, p = 0; i < g.length; i++, p += 4) {
-      g[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+      const r = data[p], gr = data[p + 1], b = data[p + 2];
+      const lum = 0.299 * r + 0.587 * gr + 0.114 * b;
+      const chroma = Math.max(r, gr, b) - Math.min(r, gr, b);
+      g[i] = Math.max(0, lum - 2 * chroma);
     }
     return g;
   }
@@ -125,116 +130,186 @@
     return true;
   }
 
-  /* 各辺の内側と外側の「地の明るさ」(明るい側 80% 点)の差。本物の紙の縁なら差がはっきり出る。
-   * 文字の固まりや印刷された表の枠は、内外とも同じ紙なので差が出ない。
-   * 画面の端に接している辺(紙が画面からはみ出している)は合格扱い。 */
-  function sidesWithContrast(q, g, w, h) {
+  /* 四角形 q の各辺について、内側と外側の「紙らしさ」(明るい側 80% 点)の差を調べる。
+   * 本物の紙の縁なら内側(紙)が外側(背景)よりはっきり高くなる。
+   * 文字の行や印刷された表の枠は、内外とも同じ紙なので差が出ない。
+   * 画面の端に重なる辺(紙が画面からはみ出している)は「画面端」として別に数える。
+   * ただし画面端の辺も、その内側が紙でなければ失格(背景ごと画面端まで囲う候補を落とす)。
+   * paper: その候補の内側の紙の明るさの目安 */
+  function sideStats(q, g, w, h, paper) {
     const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4, cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
     const off = Math.max(3, Math.round(Math.max(w, h) / 80));
-    let ok = 0;
+    const at = (x, y) => {
+      x = Math.round(x); y = Math.round(y);
+      return x < 0 || y < 0 || x >= w || y >= h ? -1 : g[y * w + x];
+    };
+    const res = { frame: 0, pass: 0, fail: 0, qual: 0, pos: 0, neg: 0 };
     for (let k = 0; k < 4; k++) {
       const a = q[k], b = q[(k + 1) % 4];
       let nx = b[1] - a[1], ny = a[0] - b[0];
       const len = Math.hypot(nx, ny) || 1; nx /= len; ny /= len;
       const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
       if ((mx - cx) * nx + (my - cy) * ny < 0) { nx = -nx; ny = -ny; } // 外向きにそろえる
-      const ins = [], outs = [];
-      let outOfFrame = 0;
-      for (let t = 0.1; t <= 0.9; t += 0.04) {
+      let n = 0, pos = 0, neg = 0;
+      const insAll = [];
+      for (let t = 0.06; t <= 0.94; t += 0.04) {
         const px = a[0] + (b[0] - a[0]) * t, py = a[1] + (b[1] - a[1]) * t;
-        const ox = Math.round(px + nx * off), oy = Math.round(py + ny * off);
-        // 検出した輪郭は太らせたエッジの外側にあるので、内側はさらに少し奥を見る
-        const ix = Math.round(px - nx * (off + 3)), iy = Math.round(py - ny * (off + 3));
-        if (ox < 0 || oy < 0 || ox >= w || oy >= h) { outOfFrame++; continue; }
-        if (ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
-        ins.push(g[iy * w + ix]); outs.push(g[oy * w + ox]);
+        // 内側・外側それぞれ2点ずつ見る(文字の上に当たっても判定がぶれないように)
+        const i1 = at(px - nx * (off + 1), py - ny * (off + 1)), i2 = at(px - nx * (off + 3), py - ny * (off + 3));
+        const o1 = at(px + nx * off, py + ny * off), o2 = at(px + nx * (off + 2), py + ny * (off + 2));
+        if (i1 < 0 || i2 < 0) continue;
+        insAll.push(Math.max(i1, i2));
+        if (o1 < 0 || o2 < 0) continue;
+        n++;
+        if (Math.max(i1, i2) - Math.max(o1, o2) >= 16) pos++;       // 内側が紙・外側が背景
+        else if (Math.min(o1, o2) - Math.min(i1, i2) >= 16) neg++;  // 明るい背景に濃い色のカード
       }
-      const n = ins.length;
-      const p80 = (arr) => arr.sort((x, y) => x - y)[Math.floor(arr.length * 0.8)];
-      if (outOfFrame > n) ok++;
-      else if (n >= 4 && Math.abs(p80(ins) - p80(outs)) >= 14) ok++;
+      // 辺の内側の大半が「中身」と同じ明るさであること(中央値で判定)。
+      // 画面端の辺は「紙が画面の外まで続いている」という主張なので、より厳しく見る
+      const onFrame = n < 6;
+      const median = insAll.length ? insAll.sort((x, y) => x - y)[insAll.length >> 1] : 0;
+      if (median < paper * (onFrame ? 0.85 : 0.7)) { res.fail++; continue; }
+      if (onFrame) { res.frame++; continue; }
+      // 辺の大部分(65%以上)で、内と外の差がはっきりしていること
+      const f = Math.max(pos, neg) / n;
+      if (f >= 0.65) { res.pass++; res.qual += f; if (pos >= neg) res.pos++; else res.neg++; } else res.fail++;
     }
-    return ok;
+    return res;
   }
 
-  function evaluate(label, id, count, w, h, g) {
-    const N = w * h;
-    const frac = count / N;
-    if (frac < 0.1) return null;
-    const q = cornersOf(label, id, w, h);
-    if (!isConvex(q)) return null;
-    const qa = quadArea(q);
-    if (qa / N < 0.2) return null;
-    const fill = count / Math.max(qa, 1); // 四角形らしさ
-    if (fill < 0.65) return null;
+  function quadShapeOK(q, w, h) {
+    if (!isConvex(q)) return false;
+    const a = quadArea(q) / (w * h);
+    if (a < 0.15 || a > 0.97) return false;
     // 極端に細長いものは紙ではない
     const W = (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[3][0], q[2][1] - q[3][1])) / 2;
     const H = (Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
-    if (W / H < 0.33 || W / H > 3) return null;
-    if (sidesWithContrast(q, g, w, h) < 3) return null;
-    return { corners: q.map(([x, y]) => [(x + 0.5) / w, (y + 0.5) / h]), score: fill, area: qa / N };
+    return W / H >= 0.3 && W / H <= 3.3;
   }
 
-  /* 書類の枠検出。小さめ(長辺 200〜320px)の画像を渡す。
-   * 1) エッジの外側を塗りつぶして閉じた領域を探す
-   * 2) だめなら明るさの二値化で紙を探す */
-  function detectQuad(img) {
-    const w = img.width, h = img.height, N = w * h;
-    const g = boxBlur(toGray(img), w, h, 1);
-
-    // --- 1. エッジ方式
-    const mag = new Float32Array(N);
+  /* 紙の縁らしい長い直線を探す(ハフ変換)。
+   * 勾配の向きに沿って投票し、強い直線を最大 maxLines 本返す。 */
+  function findLines(g, w, h, maxLines) {
+    const nT = 90, step = Math.PI / nT;
+    const cosT = new Float32Array(nT), sinT = new Float32Array(nT);
+    for (let k = 0; k < nT; k++) { cosT[k] = Math.cos(k * step); sinT[k] = Math.sin(k * step); }
+    const diag = Math.ceil(Math.hypot(w, h)), nR = diag + 1; // ρ は 2px 刻みで -diag〜diag
+    const acc = new Float32Array(nT * nR);
+    const gxs = new Float32Array(w * h), gys = new Float32Array(w * h), mag = new Float32Array(w * h);
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
       const gx = g[i - w + 1] + 2 * g[i + 1] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - 1] - g[i + w - 1];
       const gy = g[i + w - 1] + 2 * g[i + w] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - w] - g[i - w + 1];
-      mag[i] = Math.abs(gx) + Math.abs(gy);
+      gxs[i] = gx; gys[i] = gy; mag[i] = Math.hypot(gx, gy);
     }
-    const thr = Math.max(30, percentile(mag, 0.86));
-    // エッジを2ピクセル太らせて、指や影で途切れた紙の輪郭をつなぐ
-    const edge = new Uint8Array(N);
+    const thr = Math.max(40, percentile(mag, 0.9));
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-      if (mag[y * w + x] <= thr) continue;
-      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-        const yy = y + dy, xx = x + dx;
-        if (yy >= 0 && xx >= 0 && yy < h && xx < w) edge[yy * w + xx] = 1;
+      const i = y * w + x;
+      if (mag[i] <= thr) continue;
+      let phi = Math.atan2(gys[i], gxs[i]);
+      if (phi < 0) phi += Math.PI;
+      const k0 = Math.round(phi / step);
+      for (let dk = -3; dk <= 3; dk++) {
+        const k = ((k0 + dk) % nT + nT) % nT;
+        const rho = x * cosT[k] + y * sinT[k];
+        acc[k * nR + Math.round((rho + diag) / 2)] += mag[i];
       }
     }
-    const outside = new Uint8Array(N);
-    const stack = new Int32Array(N);
-    let sp = 0;
-    const seed = (i) => { if (!edge[i] && !outside[i]) { outside[i] = 1; stack[sp++] = i; } };
-    for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
-    for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
-    while (sp) {
-      const p = stack[--sp];
-      const x = p % w, y = (p / w) | 0;
-      if (x > 0) seed(p - 1);
-      if (x < w - 1) seed(p + 1);
-      if (y > 0) seed(p - w);
-      if (y < h - 1) seed(p + w);
+    // 強い順に取り出し、近い直線はまとめる
+    const order = [];
+    for (let i = 0; i < acc.length; i++) if (acc[i] > 0) order.push(i);
+    order.sort((a, b) => acc[b] - acc[a]);
+    const lines = [];
+    for (const i of order) {
+      if (lines.length >= maxLines) break;
+      const k = Math.floor(i / nR), rho = (i % nR) * 2 - diag;
+      const near = lines.some((l) => {
+        let dk = Math.abs(l.k - k); dk = Math.min(dk, nT - dk);
+        return dk <= 4 && Math.abs(l.rho - (dk === Math.abs(l.k - k) ? rho : -rho)) <= 8;
+      });
+      if (!near) lines.push({ k, theta: k * step, rho });
     }
-    const inner = new Uint8Array(N);
-    for (let i = 0; i < N; i++) inner[i] = outside[i] ? 0 : 1;
-    let c = largestComponent(inner, w, h);
-    let res = evaluate(c.label, c.id, c.count, w, h, g);
+    return lines;
+  }
 
-    // --- 2. 明るさ方式(紙は背景より明るいことが多い)
-    if (!res || res.area > 0.97) {
-      const t = otsu(g);
-      const bright = new Uint8Array(N);
-      for (let i = 0; i < N; i++) bright[i] = g[i] > t ? 1 : 0;
-      c = largestComponent(bright, w, h);
-      const r2 = evaluate(c.label, c.id, c.count, w, h, g);
-      if (r2 && r2.area < 0.97 && (!res || r2.score > res.score)) res = r2;
+  function intersect(l1, l2) {
+    const a1 = Math.cos(l1.theta), b1 = Math.sin(l1.theta), a2 = Math.cos(l2.theta), b2 = Math.sin(l2.theta);
+    const det = a1 * b2 - a2 * b1;
+    if (Math.abs(det) < 1e-6) return null;
+    return [(l1.rho * b2 - l2.rho * b1) / det, (a1 * l2.rho - a2 * l1.rho) / det];
+  }
+
+  /* 書類の枠検出。小さめ(長辺 200〜320px)の画像を渡す。
+   * 1) 紙の縁らしい直線(と画面の端)を組み合わせて四角形の候補を作る
+   * 2) 紙の塊の四隅から作った候補も加える
+   * 3) すべての辺で「内側が紙・外側が紙でない」と言える候補のうち、一番大きいものを選ぶ */
+  function detectQuad(img) {
+    const w = img.width, h = img.height, N = w * h;
+    const g = boxBlur(toPaperness(img), w, h, 1);
+    const candidates = [];
+
+    // --- 1. 直線の組み合わせ
+    const lines = findLines(g, w, h, 16);
+    const horiz = [], vert = [];
+    for (const l of lines) {
+      const deg = l.theta * 180 / Math.PI;
+      if (deg > 55 && deg < 125) horiz.push(l);          // 法線が縦 = 横向きの線
+      else if (deg < 35 || deg > 145) vert.push(l);       // 法線が横 = 縦向きの線
     }
-    if (res && res.area > 0.97) return null;
-    if (res) {
-      // 縮小画像での誤差で背景がはみ出さないよう、わずかに内側へ寄せる
-      const cx = res.corners.reduce((a, p) => a + p[0], 0) / 4, cy = res.corners.reduce((a, p) => a + p[1], 0) / 4;
-      res.corners = res.corners.map(([x, y]) => [x + (cx - x) * 0.025, y + (cy - y) * 0.025]);
+    // 画面の端も「縁」の候補にする(紙が画面からはみ出している場合)
+    horiz.push({ theta: Math.PI / 2, rho: 0, frame: true }, { theta: Math.PI / 2, rho: h - 1, frame: true });
+    vert.push({ theta: 0, rho: 0, frame: true }, { theta: 0, rho: w - 1, frame: true });
+    const yAt = (l) => (l.rho - (w / 2) * Math.cos(l.theta)) / Math.sin(l.theta);
+    const xAt = (l) => (l.rho - (h / 2) * Math.sin(l.theta)) / Math.cos(l.theta);
+    for (let i = 0; i < horiz.length; i++) for (let j = 0; j < horiz.length; j++) {
+      const top = horiz[i], bot = horiz[j];
+      if (yAt(bot) - yAt(top) < h * 0.2) continue;
+      for (let m = 0; m < vert.length; m++) for (let n = 0; n < vert.length; n++) {
+        const left = vert[m], right = vert[n];
+        if (xAt(right) - xAt(left) < w * 0.2) continue;
+        if (top.frame && bot.frame && left.frame && right.frame) continue;
+        const q = [intersect(top, left), intersect(top, right), intersect(bot, right), intersect(bot, left)];
+        if (q.some((p) => !p || p[0] < -w * 0.05 || p[1] < -h * 0.05 || p[0] > w * 1.05 || p[1] > h * 1.05)) continue;
+        candidates.push(q.map(([x, y]) => [clamp(x, 0, w - 1), clamp(y, 0, h - 1)]));
+      }
     }
-    return res;
+
+    // --- 2. 紙の塊の四隅(紙らしさで二値化した最大の塊)
+    const t = otsu(g);
+    const bright = new Uint8Array(N);
+    for (let i = 0; i < N; i++) bright[i] = g[i] > t ? 1 : 0;
+    const c = largestComponent(bright, w, h);
+    if (c.count > N * 0.1) candidates.push(cornersOf(c.label, c.id, w, h));
+
+    // --- 3. 評価: すべての辺の内側が紙で、画面端以外の辺では外側が紙でないこと
+    // 紙の明るさの目安は候補ごとに、その四角形の内側から測る(影で全体が暗いページにも対応)
+    const innerPaper = (q) => {
+      const v = [];
+      for (let i = 1; i < 8; i++) for (let j = 1; j < 8; j++) {
+        const u = 0.1 + 0.8 * i / 8, t = 0.1 + 0.8 * j / 8;
+        const x = (1 - t) * ((1 - u) * q[0][0] + u * q[1][0]) + t * ((1 - u) * q[3][0] + u * q[2][0]);
+        const y = (1 - t) * ((1 - u) * q[0][1] + u * q[1][1]) + t * ((1 - u) * q[3][1] + u * q[2][1]);
+        v.push(g[clamp(Math.round(y), 0, h - 1) * w + clamp(Math.round(x), 0, w - 1)]);
+      }
+      return v.sort((a, b) => a - b)[Math.floor(v.length * 0.75)];
+    };
+    let best = null, bestScore = 0;
+    for (const q of candidates) {
+      if (!quadShapeOK(q, w, h)) continue;
+      const s = sideStats(q, g, w, h, innerPaper(q));
+      // 失格の辺がなく、本物の縁が1本以上あり、明暗の向きがそろっていること
+      if (s.fail > 0 || s.pass < 1 || (s.pos && s.neg)) continue;
+      const area = quadArea(q) / N;
+      // 大きいほど・本物の縁(画面端でない辺)が多いほど・縁の差がはっきりしているほど高得点
+      const q2 = s.qual / s.pass;
+      const score = area * (0.4 + 0.15 * s.pass) * q2 * q2;
+      if (score > bestScore) { bestScore = score; best = { q, area }; }
+    }
+    if (!best) return null;
+    // 縮小画像での誤差で背景がはみ出さないよう、わずかに内側へ寄せる
+    const q = best.q.map(([x, y]) => [(x + 0.5) / w, (y + 0.5) / h]);
+    const cx = q.reduce((a, p) => a + p[0], 0) / 4, cy = q.reduce((a, p) => a + p[1], 0) / 4;
+    return { corners: q.map(([x, y]) => [x + (cx - x) * 0.02, y + (cy - y) * 0.02]), score: bestScore, area: best.area };
   }
 
   // ---------- 射影変換 ----------
@@ -339,12 +414,29 @@
     return [crop(img, 0, 0, g, img.height), crop(img, g, 0, img.width - g, img.height)];
   }
 
-  /* 一連の処理: 台形補正(切り抜き) → (見開き分割) */
+  // 時計回りに 90/180/270 度回転
+  function rotate(img, deg) {
+    deg = ((deg % 360) + 360) % 360;
+    if (!deg) return img;
+    const { data, width: w, height: h } = img;
+    const W = deg === 180 ? w : h, H = deg === 180 ? h : w;
+    const out = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let X, Y;
+      if (deg === 90) { X = h - 1 - y; Y = x; } else if (deg === 180) { X = w - 1 - x; Y = h - 1 - y; } else { X = y; Y = w - 1 - x; }
+      const s = (y * w + x) * 4, d = (Y * W + X) * 4;
+      out[d] = data[s]; out[d + 1] = data[s + 1]; out[d + 2] = data[s + 2]; out[d + 3] = 255;
+    }
+    return { data: out, width: W, height: H };
+  }
+
+  /* 一連の処理: 台形補正(切り抜き) → 回転 → (見開き分割)
+   * 見開きの綴じ目は正しい向きにしてから探す(横倒しのまま分けると上下に割れてしまうため) */
   function processPage(img, cornersNorm, opts, maxSide) {
     const quad = cornersNorm.map(([x, y]) => [x * img.width, y * img.height]);
     const [W, H] = outputSize(quad, maxSide || 2400);
-    const warped = warp(img, quad, W, H);
-    return opts.split ? splitSpread(warped) : [warped];
+    const page = rotate(warp(img, quad, W, H), opts.rotation || 0);
+    return opts.split ? splitSpread(page) : [page];
   }
 
   root.Imaging = { detectQuad, warp, processPage, homography, outputSize, splitSpread };
