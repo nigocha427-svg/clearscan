@@ -20,9 +20,11 @@ const TAG_COLORS = ['var(--sky)', 'var(--orange)', 'var(--green)', 'var(--purple
 const catOf = (id) => CATS.find((c) => c.id === id) || CATS[0];
 
 // ---------------- 設定 ----------------
+// Google Drive 連携用の OAuth クライアント ID(秘密情報ではない。許可したアドレスとテストユーザーでのみ使える)
+const DRIVE_CLIENT_ID = '326536145882-7i0ok3eu1284027088s3q27sjbi0laps.apps.googleusercontent.com';
 const DEFAULTS = {
   autoCapture: true, shutterSound: true, category: 'doc', quality: '0.85', maxSide: '2400',
-  driveClientId: '', driveFolder: 'ClearScan', driveFolderId: '', theme: 'auto', exportFormat: 'pdf',
+  driveFolder: 'ClearScan', driveFolderId: '', theme: 'auto', exportFormat: 'pdf',
 };
 const S = (() => {
   let v = {};
@@ -856,10 +858,10 @@ const Export = {
     $$('#formats .fmt').forEach((b) => b.classList.toggle('on', b.dataset.fmt === this.fmt));
     $('#exportStep1').hidden = false; $('#exportStep2').hidden = true;
     $('#exportMake').disabled = false; $('#exportMake').textContent = 'ファイルを作成';
-    $('#exportNote').innerHTML = S.driveClientId ? `保存先: Google Drive「${esc(S.driveFolder || 'ClearScan')}」フォルダ` : 'Drive に直接保存するには <a href="#" id="toDriveSettings">設定で連携</a> してください。共有メニューからDriveアプリにも保存できます。';
-    $('#exportDrive').hidden = !S.driveClientId;
+    $('#exportNote').innerHTML = `Drive の保存先: 「${esc(S.driveFolder || 'ClearScan')}」フォルダ(<a href="#" id="toDriveSettings">変更</a>)`;
+    $('#exportDrive').hidden = false;
     $('#exportScrim').classList.add('show');
-    if (S.driveClientId) Drive.loadGIS().catch(() => {});
+    Drive.loadGIS().catch(() => {}); // ログイン画面をタップ直後に開けるよう先に読み込む
   },
   close() { $('#exportScrim').classList.remove('show'); },
   async make() {
@@ -907,7 +909,7 @@ const Export = {
     const files = this.files; if (!files) return;
     const btn = $('#exportDrive');
     try {
-      await Drive.authorize(S.driveClientId); // タップ直後に呼ぶ(ポップアップ)
+      await Drive.authorize(DRIVE_CLIENT_ID); // タップ直後に呼ぶ(ポップアップ)
       btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Drive に保存中…';
       const folder = S.driveFolder || 'ClearScan';
       const id = await Drive.ensureFolder(folder, S.driveFolderId);
@@ -995,8 +997,8 @@ async function renderSettings() {
     const k = el.dataset.set;
     if (el.type === 'checkbox') el.checked = !!S[k]; else el.value = S[k];
   });
-  $('#originHint').textContent = location.origin;
-  $('#driveState').innerHTML = S.driveClientId ? (Drive.hasToken() ? '<b style="color:var(--green)">接続済み</b>' : 'クライアントID 設定済み') : '<span class="caption">未設定</span>';
+  $('#driveState').innerHTML = Drive.hasToken() ? '<b style="color:var(--green)">接続済み</b>' : '<span class="caption">保存するときに Google アカウントでログインします</span>';
+  Drive.loadGIS().catch(() => {});
   try {
     const est = await navigator.storage.estimate();
     $('#storageInfo').textContent = `${(est.usage / 1048576).toFixed(1)} MB 使用中`;
@@ -1009,14 +1011,16 @@ $('#settings').addEventListener('change', (e) => {
   if (k === 'driveFolder') S.driveFolderId = '';
   saveSettings();
   if (k === 'theme') applyTheme();
-  if (k === 'driveClientId' && S.driveClientId) Drive.loadGIS().catch(() => {});
   renderSettings();
 });
 $('#driveTest').addEventListener('click', async () => {
-  if (!S.driveClientId) { toast('先にクライアント ID を入力してください', true); return; }
+  // ログイン画面(ポップアップ)はタップの直後に開く必要があるので、部品の読み込みを待たない
+  if (!(window.google && google.accounts && google.accounts.oauth2)) {
+    Drive.loadGIS().then(() => toast('準備ができました。もう一度「接続テスト」を押してください')).catch((err) => toast(err.message, true));
+    return;
+  }
   try {
-    await Drive.loadGIS();
-    await Drive.authorize(S.driveClientId);
+    await Drive.authorize(DRIVE_CLIENT_ID);
     const id = await Drive.ensureFolder(S.driveFolder || 'ClearScan', S.driveFolderId);
     S.driveFolderId = id; saveSettings();
     toast(`接続できました(フォルダ「${S.driveFolder || 'ClearScan'}」)`);

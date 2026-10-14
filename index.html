@@ -539,22 +539,8 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
           <span class="caption">保存先フォルダ名(マイドライブ直下に作成されます)</span>
           <input class="field" data-set="driveFolder" placeholder="ClearScan">
         </div>
-        <div class="set-stack">
-          <span class="caption">OAuth クライアント ID</span>
-          <input class="field" data-set="driveClientId" placeholder="xxxxxxxx.apps.googleusercontent.com" autocapitalize="off" autocorrect="off" spellcheck="false">
-        </div>
         <div class="set-row"><span class="lbl" id="driveState">未接続</span><button class="btn-utility" id="driveTest"><svg class="ic sm"><use href="#i-cloud"/></svg>接続テスト</button></div>
-        <details class="guide">
-          <summary>クライアント ID の取得手順</summary>
-          <ol>
-            <li><b>Google Cloud Console</b>(console.cloud.google.com)で新しいプロジェクトを作成</li>
-            <li>「APIとサービス」→「ライブラリ」で <b>Google Drive API</b> を有効化</li>
-            <li>「OAuth 同意画面」を作成(外部・テストユーザーに自分のGmailを追加)</li>
-            <li>「認証情報」→「OAuth クライアント ID」→種類「ウェブアプリケーション」</li>
-            <li>「承認済みの JavaScript 生成元」に <code id="originHint"></code> を追加</li>
-            <li>表示されたクライアント ID を上の欄に貼り付け</li>
-          </ol>
-        </details>
+        <div class="set-stack"><span class="caption">保存できるのは、Google Cloud でテストユーザーに登録した Google アカウントだけです。初回のログインで「Google はこのアプリを確認していません」と出たら「続行」を選んでください。</span></div>
       </div>
     </div>
     <div class="set-group">
