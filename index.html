@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ClearScan</title>
-<meta name="description" content="書類・書籍・領収書をすばやくスキャンして、きれいなPDFとテキストに。">
+<meta name="description" content="書類・書籍・領収書をすばやくスキャンして、きれいなPDFと画像に。">
 <meta name="theme-color" content="#f6f5f4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#191919" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -174,7 +174,6 @@ img { display: block; }
 .thumb .stack { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); }
 .doc-card .name { margin-top: 8px; font-size: 15px; font-weight: 600; line-height: 1.33; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .doc-card .meta { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 13px; color: var(--muted); }
-.doc-card .snip { margin-top: 4px; font-size: 12.5px; line-height: 1.45; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 mark { background: rgba(255, 212, 0, .45); color: inherit; border-radius: 2px; padding: 0 1px; }
 
 .empty {
@@ -220,23 +219,10 @@ mark { background: rgba(255, 212, 0, .45); color: inherit; border-radius: 2px; p
 .page-card { position: relative; text-align: left; }
 .page-card .thumb { box-shadow: var(--shadow-1); }
 .page-card .num { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 13px; color: var(--muted); }
-.ocr-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; }
-.ocr-tag.done { color: var(--green); }
 .add-card { aspect-ratio: 3 / 4; border-radius: var(--r-lg); border: 1.5px dashed var(--hairline); display: grid; place-items: center; color: var(--muted); font-size: 14px; font-weight: 500; }
 .add-card div { display: grid; justify-items: center; gap: 6px; }
 .add-card:active { background: var(--fill); }
 
-.text-tools { display: flex; gap: 8px; margin-bottom: 12px; }
-.text-tools .search { flex: 1; }
-.text-page { margin-bottom: 14px; padding: 16px; }
-.text-page .eyebrow { display: flex; justify-content: space-between; margin-bottom: 8px; }
-.text-page textarea {
-  width: 100%; min-height: 120px; border: 0; outline: 0; resize: vertical; background: none; padding: 0;
-  font-size: 15px; line-height: 1.6; color: var(--ink-2); field-sizing: content;
-}
-.text-page .hl { white-space: pre-wrap; font-size: 15px; line-height: 1.6; color: var(--ink-2); word-break: break-word; }
-.text-empty { padding: 28px 20px; text-align: center; color: var(--muted); font-size: 15px; }
-.text-empty .btn-primary { margin-top: 14px; }
 
 /* ---------- カメラ(唯一のダーク面) ---------- */
 #camera { background: #0b0b0d; color: #fff; position: fixed; inset: 0; z-index: 40; }
@@ -311,7 +297,7 @@ mark { background: rgba(255, 212, 0, .45); color: inherit; border-radius: 2px; p
 .sheet { width: 100%; max-width: 560px; background: var(--surface); border-radius: var(--r-xl) var(--r-xl) 0 0; padding: 8px 20px calc(var(--safe-b) + 20px); box-shadow: var(--shadow-2); animation: up .3s cubic-bezier(.2,.8,.2,1); max-height: 90vh; overflow: auto; }
 @keyframes up { from { transform: translateY(40px); opacity: .4; } }
 .grabber { width: 36px; height: 5px; border-radius: 9999px; background: var(--fill-strong); margin: 0 auto 14px; }
-.formats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0 14px; }
+.formats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 16px 0 14px; }
 .fmt { padding: 14px 10px 12px; border-radius: var(--r-lg); border: 1px solid var(--hairline); text-align: left; }
 .fmt .tile { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: #fff; margin-bottom: 10px; }
 .fmt b { display: block; font-size: 15px; font-weight: 600; }
@@ -356,7 +342,6 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast .ic { color: var(--green); }
 .toast.err .ic { color: var(--danger); }
-.ocr-progress { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -412,7 +397,7 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
     </div>
     <label class="search">
       <svg class="ic sm"><use href="#i-search"/></svg>
-      <input id="libSearch" type="search" placeholder="タイトルや本文の文字で検索" enterkeyhint="search" autocomplete="off">
+      <input id="libSearch" type="search" placeholder="タイトルで検索" enterkeyhint="search" autocomplete="off">
     </label>
     <div class="chips lib-filters" id="libFilters"></div>
     <div id="libList"></div>
@@ -463,9 +448,7 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
       <label class="cat-select chip" id="docCat"><span class="dot"></span><span></span><select aria-label="カテゴリ"></select></label>
       <span id="docInfo"></span>
     </div>
-    <div class="seg doc-tabs" id="docTabs"><button data-tab="pages" class="on">ページ</button><button data-tab="text">テキスト</button></div>
     <div id="docPages" class="page-grid"></div>
-    <div id="docText" hidden></div>
   </div>
   <div class="dock">
     <button class="btn-primary" id="exportBtn"><svg class="ic"><use href="#i-share"/></svg>書き出し・保存</button>
@@ -527,14 +510,6 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
       </div>
     </div>
     <div class="set-group">
-      <div class="eyebrow">文字認識(OCR)</div>
-      <div class="card set-card">
-        <label class="set-row"><span class="lbl">保存時に自動で文字認識<small>初回のみ認識データ(約10MB)を読み込みます</small></span><span class="switch"><input type="checkbox" data-set="autoOCR"><span></span></span></label>
-        <label class="set-row"><span class="lbl">言語</span><select data-set="ocrLang"><option value="jpn+eng">日本語+英語</option><option value="jpn">日本語</option><option value="eng">英語</option></select></label>
-        <label class="set-row"><span class="lbl">縦書きの書籍<small>小説など縦書きの文章を読み取る</small></span><span class="switch"><input type="checkbox" data-set="vertical"><span></span></span></label>
-      </div>
-    </div>
-    <div class="set-group">
       <div class="eyebrow">Google Drive 連携</div>
       <div class="card set-card">
         <div class="set-stack">
@@ -577,9 +552,8 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
     <h2 class="h2">書き出し・保存</h2>
     <div class="caption" id="exportSub"></div>
     <div class="formats" id="formats">
-      <button class="fmt on" data-fmt="pdf"><div class="tile" style="background:var(--orange)"><svg class="ic"><use href="#i-pdf"/></svg></div><b>PDF</b><small>文字検索できる</small></button>
+      <button class="fmt on" data-fmt="pdf"><div class="tile" style="background:var(--orange)"><svg class="ic"><use href="#i-pdf"/></svg></div><b>PDF</b><small>全ページを1つに</small></button>
       <button class="fmt" data-fmt="jpg"><div class="tile" style="background:var(--sky)"><svg class="ic"><use href="#i-image"/></svg></div><b>JPEG</b><small>ページ画像</small></button>
-      <button class="fmt" data-fmt="txt"><div class="tile" style="background:var(--teal)"><svg class="ic"><use href="#i-text"/></svg></div><b>テキスト</b><small>認識した文字</small></button>
     </div>
     <div id="exportStep1" class="sheet-actions">
       <button class="btn-primary block" id="exportMake">ファイルを作成</button>

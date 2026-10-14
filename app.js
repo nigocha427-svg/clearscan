@@ -6,7 +6,6 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = (id, cls = '') => `<svg class="ic ${cls}"><use href="#i-${id}"/></svg>`;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const CATS = [
   { id: 'doc', label: '書類', color: 'var(--sky)', icon: 'file' },
@@ -21,13 +20,14 @@ const catOf = (id) => CATS.find((c) => c.id === id) || CATS[0];
 // ---------------- 設定 ----------------
 const DEFAULTS = {
   autoCapture: true, shutterSound: true, category: 'doc', quality: '0.85', maxSide: '2400',
-  autoOCR: true, ocrLang: 'jpn+eng', vertical: false,
   driveClientId: '', driveFolder: 'ClearScan', driveFolderId: '', theme: 'auto', exportFormat: 'pdf',
 };
 const S = (() => {
   let v = {};
   try { v = JSON.parse(localStorage.getItem('clearscan-settings') || '{}'); } catch (_) { v = {}; }
-  return { ...DEFAULTS, ...v };
+  const merged = { ...DEFAULTS, ...v };
+  if (!['pdf', 'jpg'].includes(merged.exportFormat)) merged.exportFormat = 'pdf';
+  return merged;
 })();
 function saveSettings() { try { localStorage.setItem('clearscan-settings', JSON.stringify(S)); } catch (_) { /* 保存できなくても動作は続ける */ } }
 function applyTheme() {
@@ -173,134 +173,8 @@ async function processPage(pageId) {
   fresh.pw = out.width; fresh.ph = out.height;
   fresh.status = 'done';
   fresh.pv = PROC_VERSION;
-  // 画像が変わったら文字認識はやり直し(手で直したテキストは残す)
-  if (fresh.ocr && !fresh.ocr.edited) fresh.ocr = null;
   await DB.put('pages', fresh);
   await refreshDocCover(fresh.docId);
-  if (S.autoOCR && !fresh.ocr) OCR.enqueue(pageId);
-}
-
-// ---------------- 文字認識 ----------------
-// 文字認識エンジン(tesseract.js 5.1.1)と認識データはアプリと一緒に配信する(外部CDNに頼らない)
-const TESS_DIR = new URL('vendor/tesseract/', location.href).href;
-const TESS_URL = TESS_DIR + 'tesseract.min.js';
-const OCR = {
-  worker: null, lang: '', queue: [], busy: false, current: null, progress: 0, status: '', listeners: new Set(),
-  notify() { this.listeners.forEach((fn) => fn()); },
-  enqueue(pageId) { if (!this.queue.includes(pageId) && this.current !== pageId) this.queue.push(pageId); this.pump(); this.notify(); },
-  pending(pageId) { return this.queue.includes(pageId) || this.current === pageId; },
-  async loadLib() {
-    if (window.Tesseract) return;
-    await new Promise((res, rej) => {
-      const s = document.createElement('script');
-      s.src = TESS_URL; s.onload = res; s.onerror = () => rej(new Error('文字認識エンジンを読み込めませんでした'));
-      document.head.appendChild(s);
-    });
-  },
-  async getWorker() {
-    const lang = S.vertical ? S.ocrLang.replace('jpn', 'jpn_vert') : S.ocrLang;
-    if (this.worker && this.lang === lang) return this.worker;
-    if (this.worker) { await this.worker.terminate(); this.worker = null; }
-    await this.loadLib();
-    this.status = '認識データを準備中…'; this.notify();
-    this.worker = await Tesseract.createWorker(lang, 1, {
-      workerPath: TESS_DIR + 'worker.min.js',
-      corePath: TESS_DIR + 'core',
-      langPath: TESS_DIR + 'lang',
-      workerBlobURL: false,
-      logger: (m) => {
-        if (m.status === 'recognizing text') { this.progress = m.progress; this.status = '文字を認識中…'; }
-        else if (/loading|initializ/.test(m.status)) { this.progress = m.progress || 0; this.status = '認識データを準備中…'; }
-        this.notify();
-      },
-    });
-    if (S.vertical) await this.worker.setParameters({ tessedit_pageseg_mode: '5' });
-    this.lang = lang;
-    return this.worker;
-  },
-  // 文字が横倒しなら、ページ自体を回転させて作り直す(1ページにつき最初の1回だけ)
-  async orient(page) {
-    const w = await this.getWorker();
-    this.status = '文字の向きを確認中…'; this.notify();
-    const rot = await detectRotation(page, w);
-    const fresh = await DB.get('pages', page.id);
-    if (!fresh) return null;
-    fresh.oriented = true;
-    if (rot) fresh.rotation = ((fresh.rotation || 0) + rot) % 360;
-    await DB.put('pages', fresh);
-    if (rot) await processPage(page.id);
-    this.status = '文字を認識中…'; this.notify();
-    return DB.get('pages', page.id);
-  },
-  async pump() {
-    if (this.busy) return;
-    this.busy = true;
-    while (this.queue.length) {
-      // 撮影中はカメラを優先し、文字認識は後回しにする
-      while (state.screen === 'camera') await sleep(600);
-      const id = this.queue.shift();
-      this.current = id; this.progress = 0; this.notify();
-      try {
-        let page = await DB.get('pages', id);
-        if (page && page.processed && !page.oriented) page = await this.orient(page);
-        if (page && page.processed) {
-          const w = await this.getWorker();
-          const { data } = await w.recognize(page.processed);
-          const fresh = await DB.get('pages', id);
-          if (fresh) {
-            const W = fresh.pw || 1, H = fresh.ph || 1;
-            const lines = (data.lines || [])
-              .filter((l) => l.confidence > 35 && l.text.trim())
-              .map((l) => ({ t: cleanText(l.text), b: [l.bbox.x0 / W, l.bbox.y0 / H, l.bbox.x1 / W, l.bbox.y1 / H] }));
-            fresh.ocr = { text: lines.map((l) => l.t).join('\n'), lines, at: Date.now(), edited: false };
-            await DB.put('pages', fresh);
-            await refreshDocText(fresh.docId);
-          }
-        }
-      } catch (err) {
-        console.error(err);
-        toast(err.message || '文字認識に失敗しました', true);
-        this.queue.length = 0;
-      }
-      this.current = null; this.notify();
-    }
-    this.busy = false; this.status = ''; this.notify();
-  },
-};
-/* 文字の向きを調べ、正しい向きにするための時計回りの回転角(0/90/270)を返す。
- * ページ中央を試しに読み、読み取りの確からしさ(confidence)が一番高い向きを選ぶ。
- * そのままの向きで十分に読めれば、回転の試し読みは省く。 */
-async function detectRotation(page, worker) {
-  const img = await loadImage(page.processed);
-  const c = drawScaled(img, img.naturalWidth, img.naturalHeight, 1200);
-  const w = c.width, h = c.height;
-  const cw = Math.round(w * 0.6), ch = Math.round(h * 0.6);
-  const center = canvasOf(cw, ch);
-  center.getContext('2d').drawImage(c, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, cw, ch);
-  const score = async (deg) => {
-    let target = center;
-    if (deg) {
-      target = canvasOf(ch, cw);
-      const ctx = target.getContext('2d');
-      ctx.translate(ch / 2, cw / 2); ctx.rotate(deg * Math.PI / 180); ctx.drawImage(center, -cw / 2, -ch / 2);
-    }
-    const { data } = await worker.recognize(target);
-    return data.confidence || 0;
-  };
-  const upright = await score(0);
-  if (upright >= 60) return 0;
-  const r90 = await score(90), r270 = await score(270);
-  const best = r90 >= r270 ? 90 : 270;
-  // 回した方がはっきり良く読めるときだけ回転する
-  return Math.max(r90, r270) > upright + 10 ? best : 0;
-}
-
-// 日本語の文字間に入る余分な空白を取り除く
-function cleanText(s) {
-  // Tesseract は円記号を \ と読むことがある
-  let t = s.replace(/[ \t]+\n/g, '\n').replace(/\\(?=\s?\d)/g, '¥').trim();
-  for (let i = 0; i < 2; i++) t = t.replace(/([^\x00-\x7F]) +([^\x00-\x7F])/g, '$1$2');
-  return t;
 }
 
 // ---------------- ドキュメント操作 ----------------
@@ -316,7 +190,7 @@ function defaultTitle(cat) {
   return `${catOf(cat).label} ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`;
 }
 async function createDoc(category) {
-  const doc = { id: uid(), title: defaultTitle(category), category, createdAt: Date.now(), updatedAt: Date.now(), pageIds: [], cover: null, text: '' };
+  const doc = { id: uid(), title: defaultTitle(category), category, createdAt: Date.now(), updatedAt: Date.now(), pageIds: [], cover: null };
   await DB.put('docs', doc);
   return doc;
 }
@@ -334,18 +208,9 @@ async function refreshDocCover(docId) {
   const first = await DB.get('pages', doc.pageIds[0]);
   if (first && first.thumb && doc.cover !== first.thumb) { doc.cover = first.thumb; await DB.put('docs', doc); }
 }
-async function refreshDocText(docId) {
-  const doc = await DB.get('docs', docId);
-  if (!doc) return;
-  const texts = [];
-  for (const pid of doc.pageIds) { const p = await DB.get('pages', pid); if (p && p.ocr) texts.push(p.ocr.text); }
-  doc.text = texts.join('\n\n');
-  await DB.put('docs', doc);
-}
-
 /* 1枚の元画像からページを作る(見開き分割なら2ページ) */
 async function addCapture(docId, blob, corners, split) {
-  const base = { docId, original: blob, corners: corners || FULL, rotation: 0, processed: null, thumb: null, status: 'pending', ocr: null, createdAt: Date.now() };
+  const base = { docId, original: blob, corners: corners || FULL, rotation: 0, processed: null, thumb: null, status: 'pending', createdAt: Date.now() };
   const pages = [];
   if (split) {
     const a = { ...base, id: uid(), part: 0 }, b = { ...base, id: uid(), part: 1 };
@@ -391,7 +256,7 @@ async function importFiles(files, docId) {
 }
 
 // ---------------- 画面遷移 ----------------
-const state = { screen: 'library', docId: null, pageId: null, tab: 'pages', filter: 'all', query: '' };
+const state = { screen: 'library', docId: null, pageId: null, filter: 'all', query: '' };
 function go(screen, params = {}, replace = false) {
   Object.assign(state, params, { screen });
   const snap = { screen: state.screen, docId: state.docId, pageId: state.pageId };
@@ -434,14 +299,6 @@ function toast(msg, err = false) {
 
 // ---------------- ライブラリ ----------------
 const norm = (s) => (s || '').normalize('NFKC').toLowerCase();
-function snippet(text, q) {
-  const t = text.replace(/\s+/g, ' ');
-  const i = norm(t).indexOf(q);
-  if (i < 0) return '';
-  const start = Math.max(0, i - 18);
-  const part = t.slice(start, i + q.length + 50);
-  return (start > 0 ? '…' : '') + highlight(part, q);
-}
 function highlight(text, q) {
   if (!q) return esc(text);
   const n = norm(text);
@@ -461,7 +318,7 @@ async function renderLibrary() {
   $('#libFilters').innerHTML = [`<button class="chip ${state.filter === 'all' ? 'on' : ''}" data-f="all">すべて</button>`]
     .concat(CATS.map((c) => `<button class="chip ${state.filter === c.id ? 'on' : ''}" data-f="${c.id}"><span class="dot" style="background:${c.color}"></span>${c.label}</button>`)).join('');
   const q = norm($('#libSearch').value.trim());
-  const list = docs.filter((d) => (state.filter === 'all' || d.category === state.filter) && (!q || norm(d.title).includes(q) || norm(d.text).includes(q)));
+  const list = docs.filter((d) => (state.filter === 'all' || d.category === state.filter) && (!q || norm(d.title).includes(q)));
   const el = $('#libList');
   if (!docs.length) {
     el.innerHTML = `<div class="empty">
@@ -472,7 +329,7 @@ async function renderLibrary() {
         <div class="sticker" style="background:var(--purple);--rot:7deg">${icon('idcard')}</div>
       </div>
       <h2 class="h2">最初の1枚をスキャン</h2>
-      <p>書類・書籍・領収書・身分証・メモ。まっすぐに切り抜いて、文字まで検索できるPDFにします。</p>
+      <p>書類・書籍・領収書・身分証・メモ。まっすぐに切り抜いて、PDFや画像で保存できます。</p>
     </div>`;
     return;
   }
@@ -480,17 +337,16 @@ async function renderLibrary() {
   el.innerHTML = `<div class="grid">${list.map((d, i) => {
     const c = catOf(d.category);
     const cover = d.cover ? `<img src="${blobURL('cover:' + d.id, d.cover)}" alt="">` : `<div class="stack"><div class="spinner"></div></div>`;
-    const snip = q && !norm(d.title).includes(q) ? `<div class="snip">${snippet(d.text, q)}</div>` : '';
     return `<button class="doc-card" data-id="${d.id}" style="animation-delay:${Math.min(i, 10) * 30}ms">
       <div class="thumb">${cover}<div class="pages"><span class="badge">${d.pageIds.length}ページ</span></div></div>
       <div class="name">${highlight(d.title, q)}</div>
-      <div class="meta"><span class="dot" style="background:${c.color}"></span>${c.label} · ${fmtDate(d.updatedAt)}</div>${snip}
+      <div class="meta"><span class="dot" style="background:${c.color}"></span>${c.label} · ${fmtDate(d.updatedAt)}</div>
     </button>`;
   }).join('')}</div>`;
 }
 $('#libFilters').addEventListener('click', (e) => { const b = e.target.closest('[data-f]'); if (b) { state.filter = b.dataset.f; renderLibrary(); } });
 $('#libSearch').addEventListener('input', () => renderLibrary());
-$('#libList').addEventListener('click', (e) => { const c = e.target.closest('.doc-card'); if (c) go('doc', { docId: c.dataset.id, tab: 'pages' }); });
+$('#libList').addEventListener('click', (e) => { const c = e.target.closest('.doc-card'); if (c) go('doc', { docId: c.dataset.id }); });
 $('#scanBtn').addEventListener('click', () => go('camera', { docId: null }));
 $('#openSettings').addEventListener('click', () => go('settings'));
 let importTarget = null;
@@ -502,7 +358,7 @@ $('#fileInput').addEventListener('change', async (e) => {
   const id = await importFiles(files, target);
   if (!id) return;
   if (state.screen === 'doc' && state.docId === id) renderDoc();
-  else go('doc', { docId: id, tab: 'pages' }, state.screen === 'camera');
+  else go('doc', { docId: id }, state.screen === 'camera');
 });
 
 // ---------------- シャッター音 ----------------
@@ -717,7 +573,7 @@ const Cam = {
     }
   },
   finish() {
-    if (this.docId && this.count) go('doc', { docId: this.docId, tab: 'pages' }, true);
+    if (this.docId && this.count) go('doc', { docId: this.docId }, true);
     else back();
   },
 };
@@ -757,49 +613,11 @@ async function renderDoc() {
   $('span:nth-child(2)', cs).textContent = c.label;
   $('select', cs).innerHTML = CATS.map((x) => `<option value="${x.id}" ${x.id === doc.category ? 'selected' : ''}>${x.label}</option>`).join('');
   $('#docInfo').textContent = `${pages.length}ページ · ${fmtDate(doc.createdAt)}`;
-  $$('#docTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
-  $('#docPages').hidden = state.tab !== 'pages';
-  $('#docText').hidden = state.tab !== 'text';
-  if (state.tab === 'pages') {
-    $('#docPages').innerHTML = pages.map((p, i) => {
-      const img = p.thumb ? `<img src="${blobURL('thumb:' + p.id, p.thumb)}" alt="">` : `<div class="stack"><div class="spinner"></div></div>`;
-      let tag = '';
-      if (p.ocr) tag = `<span class="ocr-tag done">${icon('check', 'sm')}文字認識済み</span>`;
-      else if (OCR.pending(p.id)) tag = `<span class="ocr-tag"><span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span>認識中</span>`;
-      return `<button class="page-card" data-id="${p.id}"><div class="thumb">${img}</div><div class="num"><span>${i + 1}</span>${tag}</div></button>`;
-    }).join('') + `<button class="add-card" id="addPage"><div>${icon('camera', 'lg')}ページを追加</div></button>`;
-  } else renderDocText(doc, pages);
+  $('#docPages').innerHTML = pages.map((p, i) => {
+    const img = p.thumb ? `<img src="${blobURL('thumb:' + p.id, p.thumb)}" alt="">` : `<div class="stack"><div class="spinner"></div></div>`;
+    return `<button class="page-card" data-id="${p.id}"><div class="thumb">${img}</div><div class="num"><span>${i + 1}</span></div></button>`;
+  }).join('') + `<button class="add-card" id="addPage"><div>${icon('camera', 'lg')}ページを追加</div></button>`;
 }
-async function renderDocText(doc, pages) {
-  const box = $('#docText');
-  const q = norm((box.querySelector('#textQuery') || {}).value || '');
-  const hasText = pages.some((p) => p.ocr && p.ocr.text);
-  const running = pages.some((p) => OCR.pending(p.id));
-  if (!hasText) {
-    box.innerHTML = `<div class="card text-empty">${running
-      ? `<div class="ocr-progress" style="justify-content:center"><span class="spinner"></span><span id="ocrStatus">${OCR.status || '文字を認識中…'}</span></div>`
-      : `まだ文字認識されていません。<br><button class="btn-primary" id="runOCR">${icon('text')}文字を認識する</button>`}</div>`;
-    return;
-  }
-  if (!box.querySelector('#textQuery')) {
-    box.innerHTML = `<div class="text-tools">
-        <label class="search">${icon('search', 'sm')}<input id="textQuery" type="search" placeholder="このドキュメント内を検索" autocomplete="off"></label>
-        <button class="btn-utility" id="copyAll">${icon('copy', 'sm')}コピー</button>
-      </div><div id="textPages"></div>`;
-  }
-  $('#textPages').innerHTML = pages.map((p, i) => {
-    const t = p.ocr ? p.ocr.text : '';
-    const status = p.ocr ? (p.ocr.edited ? '編集済み' : '') : (OCR.pending(p.id) ? '認識中…' : '未認識');
-    const body = q ? `<div class="hl">${highlight(t, q) || '<span class="caption">(なし)</span>'}</div>`
-      : `<textarea data-id="${p.id}" placeholder="テキストなし">${esc(t)}</textarea>`;
-    return `<div class="card text-page"><div class="eyebrow"><span>ページ ${i + 1}</span><span>${status}</span></div>${body}</div>`;
-  }).join('') + (running ? '' : `<div style="text-align:center;padding:4px 0 8px"><button class="btn-utility" id="rerunOCR">${icon('rotate', 'sm')}文字認識をやり直す</button></div>`);
-  if (q) {
-    const n = pages.reduce((a, p) => a + (p.ocr ? (norm(p.ocr.text).split(q).length - 1) : 0), 0);
-    $('#textPages').insertAdjacentHTML('afterbegin', `<div class="caption" style="margin:-4px 2px 10px">${n}件ヒット</div>`);
-  }
-}
-$('#docTabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) { state.tab = b.dataset.tab; $('#docText').innerHTML = ''; renderDoc(); } });
 $('#docPages').addEventListener('click', (e) => {
   if (e.target.closest('#addPage')) { go('camera', { docId: state.docId }); return; }
   const c = e.target.closest('.page-card'); if (c) go('edit', { pageId: c.dataset.id });
@@ -816,53 +634,16 @@ $('#docDelete').addEventListener('click', async () => {
   toast('削除しました');
   go('library', {}, true);
 });
-$('#docText').addEventListener('click', async (e) => {
-  if (e.target.closest('#runOCR') || e.target.closest('#rerunOCR')) {
-    const doc = await DB.get('docs', state.docId);
-    const redo = !!e.target.closest('#rerunOCR');
-    if (redo && !confirm('手で編集したテキストも上書きされます。やり直しますか?')) return;
-    for (const id of doc.pageIds) {
-      if (redo) { const p = await DB.get('pages', id); if (p) { p.ocr = null; await DB.put('pages', p); } }
-      OCR.enqueue(id);
-    }
-    $('#docText').innerHTML = '';
-    renderDoc();
-  }
-  if (e.target.closest('#copyAll')) {
-    const doc = await DB.get('docs', state.docId);
-    try { await navigator.clipboard.writeText(doc.text || ''); toast('テキストをコピーしました'); } catch (_) { toast('コピーできませんでした', true); }
-  }
-});
-$('#docText').addEventListener('input', (e) => {
-  if (e.target.id === 'textQuery') { renderDoc(); return; }
-  const ta = e.target.closest('textarea[data-id]'); if (!ta) return;
-  clearTimeout(ta._t);
-  ta._t = setTimeout(async () => {
-    const p = await DB.get('pages', ta.dataset.id); if (!p) return;
-    p.ocr = { ...(p.ocr || { lines: [] }), text: ta.value, edited: true, at: Date.now() };
-    await DB.put('pages', p);
-    await refreshDocText(p.docId);
-  }, 400);
-});
-// 処理・認識の進み具合を画面に反映
+// 画像処理の進み具合を画面に反映
 let liveTimer;
 function scheduleLive() {
   clearTimeout(liveTimer);
   liveTimer = setTimeout(() => {
-    if (state.screen === 'doc') {
-      const st = $('#ocrStatus');
-      if (st && OCR.current) st.textContent = `${OCR.status || '文字を認識中…'} ${Math.round(OCR.progress * 100)}%`;
-      if (!document.activeElement || document.activeElement.tagName !== 'TEXTAREA') renderDoc();
-    } else if (state.screen === 'library') renderLibrary();
+    if (state.screen === 'doc') renderDoc();
+    else if (state.screen === 'library') renderLibrary();
   }, 250);
 }
 Proc.listeners.add(scheduleLive);
-let lastOcrCurrent = null;
-OCR.listeners.add(() => {
-  const st = $('#ocrStatus');
-  if (st && OCR.current) st.textContent = `${OCR.status || '文字を認識中…'} ${Math.round(OCR.progress * 100)}%`;
-  if (OCR.current !== lastOcrCurrent) { lastOcrCurrent = OCR.current; scheduleLive(); }
-});
 
 // ---------------- ページ編集 ----------------
 const Editor = {
@@ -945,7 +726,7 @@ $('#optSplit').addEventListener('change', async (e) => {
   const p = Editor.page;
   const doc = await DB.get('docs', p.docId);
   if (e.target.checked && !p.splitWith) {
-    const sib = { ...p, id: uid(), part: 1, processed: null, thumb: null, status: 'pending', ocr: null };
+    const sib = { ...p, id: uid(), part: 1, processed: null, thumb: null, status: 'pending' };
     p.part = 0; p.splitWith = sib.id; sib.splitWith = p.id;
     await DB.put('pages', sib);
     doc.pageIds.splice(doc.pageIds.indexOf(p.id) + 1, 0, sib.id);
@@ -961,14 +742,14 @@ $('#optSplit').addEventListener('change', async (e) => {
   await Editor.save();
   Editor.open(p.id);
 });
-$('#editRotate').addEventListener('click', () => { Editor.page.rotation = ((Editor.page.rotation || 0) + 90) % 360; Editor.page.oriented = true; Editor.save(); });
+$('#editRotate').addEventListener('click', () => { Editor.page.rotation = ((Editor.page.rotation || 0) + 90) % 360; Editor.save(); });
 async function movePage(delta) {
   const doc = await DB.get('docs', Editor.page.docId);
   const i = doc.pageIds.indexOf(Editor.page.id), j = i + delta;
   if (j < 0 || j >= doc.pageIds.length) return;
   [doc.pageIds[i], doc.pageIds[j]] = [doc.pageIds[j], doc.pageIds[i]];
   await DB.put('docs', doc);
-  await refreshDocCover(doc.id); await refreshDocText(doc.id);
+  await refreshDocCover(doc.id);
   $('#editTitle').textContent = `ページ ${j + 1} / ${doc.pageIds.length}`;
   toast(`${j + 1}ページ目に移動しました`);
 }
@@ -983,7 +764,7 @@ $('#editDelete').addEventListener('click', async () => {
   doc.pageIds = doc.pageIds.filter((x) => x !== p.id);
   if (!doc.pageIds.length) { await DB.del('docs', doc.id); toast('ドキュメントを削除しました'); go('library', {}, true); return; }
   await DB.put('docs', doc);
-  doc.cover = null; await DB.put('docs', doc); await refreshDocCover(doc.id); await refreshDocText(doc.id);
+  doc.cover = null; await DB.put('docs', doc); await refreshDocCover(doc.id);
   back();
 });
 // 四隅のドラッグ
@@ -1049,21 +830,12 @@ const Export = {
       for (const id of doc.pageIds) { const p = await DB.get('pages', id); if (p && p.processed) pages.push(p); }
       if (!pages.length) throw new Error('ページがありません');
       const base = (doc.title || 'scan').replace(/[\\/:*?"<>|]+/g, '_');
-      if (this.fmt !== 'jpg' && pages.some((p) => !p.ocr)) {
-        btn.innerHTML = '<span class="spinner" style="border-color:rgba(255,255,255,.35);border-top-color:#fff"></span>文字を認識中…';
-        pages.filter((p) => !p.ocr).forEach((p) => OCR.enqueue(p.id));
-        while (pages.some((p) => OCR.pending(p.id))) await sleep(300);
-        for (let i = 0; i < pages.length; i++) pages[i] = await DB.get('pages', pages[i].id);
-      }
       if (this.fmt === 'pdf') {
         const list = [];
-        for (const p of pages) list.push({ jpeg: new Uint8Array(await p.processed.arrayBuffer()), width: p.pw, height: p.ph, lines: p.ocr && !p.ocr.edited ? p.ocr.lines : textAsLines(p) });
+        for (const p of pages) list.push({ jpeg: new Uint8Array(await p.processed.arrayBuffer()), width: p.pw, height: p.ph });
         this.files = [new File([PDF.build(list, doc.title)], `${base}.pdf`, { type: 'application/pdf' })];
-      } else if (this.fmt === 'jpg') {
-        this.files = pages.map((p, i) => new File([p.processed], pages.length > 1 ? `${base}_${String(i + 1).padStart(2, '0')}.jpg` : `${base}.jpg`, { type: 'image/jpeg' }));
       } else {
-        const txt = pages.map((p, i) => (pages.length > 1 ? `--- ${i + 1} ---\n` : '') + ((p.ocr && p.ocr.text) || '')).join('\n\n');
-        this.files = [new File([txt], `${base}.txt`, { type: 'text/plain;charset=utf-8' })];
+        this.files = pages.map((p, i) => new File([p.processed], pages.length > 1 ? `${base}_${String(i + 1).padStart(2, '0')}.jpg` : `${base}.jpg`, { type: 'image/jpeg' }));
       }
       const size = this.files.reduce((a, f) => a + f.size, 0);
       $('#readyName').textContent = this.files.length > 1 ? `${this.files[0].name} ほか${this.files.length - 1}件` : this.files[0].name;
@@ -1106,13 +878,6 @@ const Export = {
     btn.disabled = false; btn.innerHTML = `${icon('cloud')}Google Drive に保存`;
   },
 };
-// 手で直したテキストは位置が分からないので、ページ上部に行ごとに置いて検索だけできるようにする
-function textAsLines(p) {
-  const t = (p.ocr && p.ocr.text) || '';
-  const ls = t.split('\n').filter((s) => s.trim());
-  const n = Math.max(ls.length, 1), h = Math.min(0.03, 0.9 / n);
-  return ls.map((s, i) => ({ t: s, b: [0.05, 0.05 + i * h, 0.95, 0.05 + (i + 1) * h] }));
-}
 $('#exportBtn').addEventListener('click', () => Export.open());
 $('#exportScrim').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) Export.close();
@@ -1175,4 +940,6 @@ $('#driveTest').addEventListener('click', async () => {
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  // 以前の文字認識エンジンが端末に保存した認識データ(約10MB)を削除する
+  try { indexedDB.deleteDatabase('keyval-store'); } catch (_) { /* なくてもよい */ }
 })();

@@ -1,7 +1,7 @@
 {
   "name": "ClearScan",
   "short_name": "ClearScan",
-  "description": "書類・書籍・領収書をすばやくスキャンして、きれいなPDFとテキストに。",
+  "description": "書類・書籍・領収書をすばやくスキャンして、きれいなPDFと画像に。",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

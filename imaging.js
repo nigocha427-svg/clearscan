@@ -232,7 +232,7 @@
     if (res) {
       // 縮小画像での誤差で背景がはみ出さないよう、わずかに内側へ寄せる
       const cx = res.corners.reduce((a, p) => a + p[0], 0) / 4, cy = res.corners.reduce((a, p) => a + p[1], 0) / 4;
-      res.corners = res.corners.map(([x, y]) => [x + (cx - x) * 0.012, y + (cy - y) * 0.012]);
+      res.corners = res.corners.map(([x, y]) => [x + (cx - x) * 0.025, y + (cy - y) * 0.025]);
     }
     return res;
   }

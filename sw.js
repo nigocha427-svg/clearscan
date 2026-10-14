@@ -1,5 +1,5 @@
 /* ClearScan — オフライン対応 */
-const CACHE = 'clearscan-v4';
+const CACHE = 'clearscan-v5';
 const SHELL = ['./', 'index.html', 'app.js', 'imaging.js', 'worker.js', 'pdf.js', 'drive.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -13,8 +13,6 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   // Google のログイン・Drive API はキャッシュしない
   if (/^(www|oauth2)\.googleapis\.com$|^(accounts|apis)\.google\.com$/.test(url.host)) return;
-  // 認識データは文字認識エンジン自身が端末に保存するので二重に持たない
-  if (url.pathname.includes('/vendor/tesseract/lang/')) return;
   if (url.origin === location.origin) {
     // 自分のファイル: ネット優先(更新をすぐ反映)、オフライン時はキャッシュ
     e.respondWith(fetch(e.request).then((res) => {
