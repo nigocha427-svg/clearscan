@@ -1,5 +1,5 @@
 /* ClearScan — 画像処理ライブラリ
- * メインスレッド(枠検出)とワーカー(台形補正・補正処理)の両方から読み込む。
+ * メインスレッド(枠検出)とワーカー(台形補正・切り抜き)の両方から読み込む。
  * 画像は {data: Uint8ClampedArray(RGBA), width, height} の形で扱う。
  */
 (function (root) {
@@ -125,16 +125,53 @@
     return true;
   }
 
-  function evaluate(label, id, count, w, h) {
+  /* 各辺の内側と外側の「地の明るさ」(明るい側 80% 点)の差。本物の紙の縁なら差がはっきり出る。
+   * 文字の固まりや印刷された表の枠は、内外とも同じ紙なので差が出ない。
+   * 画面の端に接している辺(紙が画面からはみ出している)は合格扱い。 */
+  function sidesWithContrast(q, g, w, h) {
+    const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4, cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
+    const off = Math.max(3, Math.round(Math.max(w, h) / 80));
+    let ok = 0;
+    for (let k = 0; k < 4; k++) {
+      const a = q[k], b = q[(k + 1) % 4];
+      let nx = b[1] - a[1], ny = a[0] - b[0];
+      const len = Math.hypot(nx, ny) || 1; nx /= len; ny /= len;
+      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      if ((mx - cx) * nx + (my - cy) * ny < 0) { nx = -nx; ny = -ny; } // 外向きにそろえる
+      const ins = [], outs = [];
+      let outOfFrame = 0;
+      for (let t = 0.1; t <= 0.9; t += 0.04) {
+        const px = a[0] + (b[0] - a[0]) * t, py = a[1] + (b[1] - a[1]) * t;
+        const ox = Math.round(px + nx * off), oy = Math.round(py + ny * off);
+        // 検出した輪郭は太らせたエッジの外側にあるので、内側はさらに少し奥を見る
+        const ix = Math.round(px - nx * (off + 3)), iy = Math.round(py - ny * (off + 3));
+        if (ox < 0 || oy < 0 || ox >= w || oy >= h) { outOfFrame++; continue; }
+        if (ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
+        ins.push(g[iy * w + ix]); outs.push(g[oy * w + ox]);
+      }
+      const n = ins.length;
+      const p80 = (arr) => arr.sort((x, y) => x - y)[Math.floor(arr.length * 0.8)];
+      if (outOfFrame > n) ok++;
+      else if (n >= 4 && Math.abs(p80(ins) - p80(outs)) >= 14) ok++;
+    }
+    return ok;
+  }
+
+  function evaluate(label, id, count, w, h, g) {
     const N = w * h;
     const frac = count / N;
     if (frac < 0.1) return null;
     const q = cornersOf(label, id, w, h);
     if (!isConvex(q)) return null;
     const qa = quadArea(q);
-    if (qa / N < 0.1) return null;
+    if (qa / N < 0.2) return null;
     const fill = count / Math.max(qa, 1); // 四角形らしさ
-    if (fill < 0.72) return null;
+    if (fill < 0.65) return null;
+    // 極端に細長いものは紙ではない
+    const W = (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[3][0], q[2][1] - q[3][1])) / 2;
+    const H = (Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
+    if (W / H < 0.33 || W / H > 3) return null;
+    if (sidesWithContrast(q, g, w, h) < 3) return null;
     return { corners: q.map(([x, y]) => [(x + 0.5) / w, (y + 0.5) / h]), score: fill, area: qa / N };
   }
 
@@ -153,11 +190,15 @@
       const gy = g[i + w - 1] + 2 * g[i + w] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - w] - g[i - w + 1];
       mag[i] = Math.abs(gx) + Math.abs(gy);
     }
-    const thr = Math.max(40, percentile(mag, 0.86));
+    const thr = Math.max(30, percentile(mag, 0.86));
+    // エッジを2ピクセル太らせて、指や影で途切れた紙の輪郭をつなぐ
     const edge = new Uint8Array(N);
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      if (mag[i] > thr) { edge[i] = 1; edge[i - 1] = 1; edge[i + 1] = 1; edge[i - w] = 1; edge[i + w] = 1; }
+      if (mag[y * w + x] <= thr) continue;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const yy = y + dy, xx = x + dx;
+        if (yy >= 0 && xx >= 0 && yy < h && xx < w) edge[yy * w + xx] = 1;
+      }
     }
     const outside = new Uint8Array(N);
     const stack = new Int32Array(N);
@@ -176,7 +217,7 @@
     const inner = new Uint8Array(N);
     for (let i = 0; i < N; i++) inner[i] = outside[i] ? 0 : 1;
     let c = largestComponent(inner, w, h);
-    let res = evaluate(c.label, c.id, c.count, w, h);
+    let res = evaluate(c.label, c.id, c.count, w, h, g);
 
     // --- 2. 明るさ方式(紙は背景より明るいことが多い)
     if (!res || res.area > 0.97) {
@@ -184,7 +225,7 @@
       const bright = new Uint8Array(N);
       for (let i = 0; i < N; i++) bright[i] = g[i] > t ? 1 : 0;
       c = largestComponent(bright, w, h);
-      const r2 = evaluate(c.label, c.id, c.count, w, h);
+      const r2 = evaluate(c.label, c.id, c.count, w, h, g);
       if (r2 && r2.area < 0.97 && (!res || r2.score > res.score)) res = r2;
     }
     if (res && res.area > 0.97) return null;
@@ -266,252 +307,6 @@
     return { data: out, width: outW, height: outH };
   }
 
-  // ---------- 補正 ----------
-  // 肌色判定(YCbCr)
-  function isSkin(r, g, b, loose) {
-    const y = 0.299 * r + 0.587 * g + 0.114 * b;
-    const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
-    const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
-    if (loose) return y > 40 && cr > 132 && cr < 185 && cb > 75 && cb < 135;
-    return y > 60 && cr > 138 && cr < 178 && cb > 80 && cb < 128 && r > g && r > b;
-  }
-
-  /* 指マスク: 画像の端に接している肌色ブロックの塊を指とみなす。
-   * 返り値: Uint8Array(w*h) 1=指 */
-  function fingerMask(img, bs, gw, gh) {
-    const { data, width: w, height: h } = img;
-    const skinBlock = new Uint8Array(gw * gh);
-    for (let by = 0; by < gh; by++) for (let bx = 0; bx < gw; bx++) {
-      let n = 0, k = 0;
-      const x1 = Math.min(w, (bx + 1) * bs), y1 = Math.min(h, (by + 1) * bs);
-      for (let y = by * bs; y < y1; y += 2) for (let x = bx * bs; x < x1; x += 2) {
-        const p = (y * w + x) * 4; n++;
-        if (isSkin(data[p], data[p + 1], data[p + 2], false)) k++;
-      }
-      skinBlock[by * gw + bx] = k / Math.max(n, 1) > 0.45 ? 1 : 0;
-    }
-    // 端に接した成分だけ残す
-    const lab = new Int32Array(gw * gh), keep = new Uint8Array(gw * gh);
-    const stack = [];
-    let id = 0;
-    for (let i = 0; i < skinBlock.length; i++) {
-      if (!skinBlock[i] || lab[i]) continue;
-      id++; const members = []; let border = false;
-      stack.push(i); lab[i] = id;
-      while (stack.length) {
-        const p = stack.pop(); members.push(p);
-        const x = p % gw, y = (p / gw) | 0;
-        if (x === 0 || y === 0 || x === gw - 1 || y === gh - 1) border = true;
-        for (const q of [x > 0 ? p - 1 : -1, x < gw - 1 ? p + 1 : -1, y > 0 ? p - gw : -1, y < gh - 1 ? p + gw : -1]) {
-          if (q >= 0 && skinBlock[q] && !lab[q]) { lab[q] = id; stack.push(q); }
-        }
-      }
-      if (border && members.length < gw * gh * 0.3) members.forEach((m) => (keep[m] = 1));
-    }
-    if (!keep.some((v) => v)) return null;
-    // 1ブロック膨張した範囲でゆるい肌色判定、中心ブロックは全塗り
-    const ring = new Uint8Array(gw * gh);
-    for (let by = 0; by < gh; by++) for (let bx = 0; bx < gw; bx++) {
-      if (!keep[by * gw + bx]) continue;
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-        const x = bx + dx, y = by + dy;
-        if (x >= 0 && y >= 0 && x < gw && y < gh) ring[y * gw + x] = 1;
-      }
-    }
-    const mask = new Uint8Array(w * h);
-    for (let y = 0; y < h; y++) {
-      const by = Math.min(gh - 1, (y / bs) | 0);
-      for (let x = 0; x < w; x++) {
-        const bi = by * gw + Math.min(gw - 1, (x / bs) | 0);
-        if (!ring[bi]) continue;
-        const p = (y * w + x) * 4;
-        if (keep[bi] || isSkin(data[p], data[p + 1], data[p + 2], true)) mask[y * w + x] = 1;
-      }
-    }
-    // 輪郭の影も含めるため数ピクセル膨張
-    const r = Math.max(2, Math.round(bs / 8));
-    const blurred = boxBlur(Float32Array.from(mask), w, h, r);
-    for (let i = 0; i < mask.length; i++) mask[i] = blurred[i] > 0.02 ? 1 : 0;
-    return mask;
-  }
-
-  /* 紙の地色(背景)をブロック単位で推定する。影・ムラ・色かぶりを含む。
-   * 各ブロックの明るい側(上位10%)の平均色を背景とみなす。 */
-  function estimateBackground(img, mask, bs, gw, gh) {
-    const { data, width: w, height: h } = img;
-    const bg = new Float32Array(gw * gh * 3);
-    const valid = new Uint8Array(gw * gh);
-    const hist = new Uint32Array(64);
-    for (let by = 0; by < gh; by++) for (let bx = 0; bx < gw; bx++) {
-      hist.fill(0);
-      let n = 0, total = 0;
-      const x1 = Math.min(w, (bx + 1) * bs), y1 = Math.min(h, (by + 1) * bs);
-      for (let y = by * bs; y < y1; y++) for (let x = bx * bs; x < x1; x++) {
-        total++;
-        if (mask && mask[y * w + x]) continue;
-        const p = (y * w + x) * 4;
-        hist[((0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]) / 4.05) | 0]++; n++;
-      }
-      if (n < total * 0.15 || n < 8) continue;
-      let acc = 0, t = 63;
-      for (; t > 0; t--) { acc += hist[t]; if (acc >= n * 0.1) break; }
-      const lo = t * 4.05;
-      let sr = 0, sg = 0, sb = 0, k = 0;
-      for (let y = by * bs; y < y1; y++) for (let x = bx * bs; x < x1; x++) {
-        if (mask && mask[y * w + x]) continue;
-        const p = (y * w + x) * 4;
-        if (0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2] >= lo) { sr += data[p]; sg += data[p + 1]; sb += data[p + 2]; k++; }
-      }
-      const bi = (by * gw + bx) * 3;
-      bg[bi] = sr / k; bg[bi + 1] = sg / k; bg[bi + 2] = sb / k;
-      valid[by * gw + bx] = 1;
-    }
-    // 無効ブロックを近傍で埋める
-    for (let iter = 0; iter < gw + gh; iter++) {
-      let missing = 0;
-      const nv = valid.slice();
-      for (let by = 0; by < gh; by++) for (let bx = 0; bx < gw; bx++) {
-        const i = by * gw + bx;
-        if (valid[i]) continue;
-        let s0 = 0, s1 = 0, s2 = 0, k = 0;
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
-          const x = bx + dx, y = by + dy;
-          if (x < 0 || y < 0 || x >= gw || y >= gh || !valid[y * gw + x]) continue;
-          const j = (y * gw + x) * 3; s0 += bg[j]; s1 += bg[j + 1]; s2 += bg[j + 2]; k++;
-        }
-        if (k) { bg[i * 3] = s0 / k; bg[i * 3 + 1] = s1 / k; bg[i * 3 + 2] = s2 / k; nv[i] = 1; } else missing++;
-      }
-      valid.set(nv);
-      if (!missing) break;
-    }
-    for (let i = 0; i < valid.length; i++) if (!valid[i]) { bg[i * 3] = bg[i * 3 + 1] = bg[i * 3 + 2] = 235; }
-
-    // 紙全体の白さ(上位ブロック)を基準に、写真や図版で暗くなりすぎたブロックを持ち上げる
-    const lums = new Float32Array(gw * gh);
-    for (let i = 0; i < lums.length; i++) lums[i] = 0.299 * bg[i * 3] + 0.587 * bg[i * 3 + 1] + 0.114 * bg[i * 3 + 2];
-    const paper = Math.max(60, percentile(lums, 0.9));
-    for (let i = 0; i < lums.length; i++) {
-      const floor = paper * 0.5;
-      if (lums[i] < floor) { const f = floor / Math.max(lums[i], 1); bg[i * 3] *= f; bg[i * 3 + 1] *= f; bg[i * 3 + 2] *= f; }
-    }
-    // 3x3 最大値 → ぼかし(太字の見出しなどを背景に含めない)
-    const mx = new Float32Array(bg.length);
-    for (let by = 0; by < gh; by++) for (let bx = 0; bx < gw; bx++) {
-      let best = -1, bj = 0;
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-        const x = bx + dx, y = by + dy;
-        if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
-        if (lums[y * gw + x] > best) { best = lums[y * gw + x]; bj = y * gw + x; }
-      }
-      const i = by * gw + bx;
-      // 最大値と自分の値の中間を採用(影の境界を残しすぎない)
-      for (let c = 0; c < 3; c++) mx[i * 3 + c] = (bg[bj * 3 + c] * 0.6 + bg[i * 3 + c] * 0.4);
-    }
-    for (let c = 0; c < 3; c++) {
-      const ch = new Float32Array(gw * gh);
-      for (let i = 0; i < ch.length; i++) ch[i] = mx[i * 3 + c];
-      const bl = boxBlur(boxBlur(ch, gw, gh, 1), gw, gh, 1);
-      for (let i = 0; i < ch.length; i++) bg[i * 3 + c] = bl[i];
-    }
-    return { bg, paper };
-  }
-
-  function sampleGrid(bg, gw, gh, bs, x, y, out) {
-    let gx = (x + 0.5) / bs - 0.5, gy = (y + 0.5) / bs - 0.5;
-    gx = clamp(gx, 0, gw - 1); gy = clamp(gy, 0, gh - 1);
-    const x0 = Math.min(gw - 2, gx | 0), y0 = Math.min(gh - 2, gy | 0);
-    if (gw < 2 || gh < 2) { out[0] = bg[0]; out[1] = bg[1]; out[2] = bg[2]; return; }
-    const ax = gx - x0, ay = gy - y0;
-    const i00 = (y0 * gw + x0) * 3, i10 = i00 + 3, i01 = i00 + gw * 3, i11 = i01 + 3;
-    for (let c = 0; c < 3; c++) {
-      const t = bg[i00 + c] + (bg[i10 + c] - bg[i00 + c]) * ax;
-      const b = bg[i01 + c] + (bg[i11 + c] - bg[i01 + c]) * ax;
-      out[c] = t + (b - t) * ay;
-    }
-  }
-
-  function sharpen(img, amount) {
-    const { data, width: w, height: h } = img;
-    const src = new Uint8ClampedArray(data);
-    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-      const p = (y * w + x) * 4;
-      for (let c = 0; c < 3; c++) {
-        const n = (src[p - 4 + c] + src[p + 4 + c] + src[p - w * 4 + c] + src[p + w * 4 + c]) / 4;
-        data[p + c] = src[p + c] + (src[p + c] - n) * amount;
-      }
-    }
-  }
-
-  /* opts: { mode: auto|color|gray|bw|photo|original, shadow, finger, clean } */
-  function enhance(img, opts) {
-    const { data, width: w, height: h } = img;
-    const mode = opts.mode || 'auto';
-    if (mode === 'original') return img;
-    const bs = Math.max(8, Math.round(Math.max(w, h) / 48));
-    const gw = Math.ceil(w / bs), gh = Math.ceil(h / bs);
-    const mask = opts.finger ? fingerMask(img, bs, gw, gh) : null;
-    const { bg, paper } = estimateBackground(img, mask, bs, gw, gh);
-    const out = new Uint8ClampedArray(data.length);
-    const b = [0, 0, 0];
-
-    if (mode === 'photo') {
-      // 身分証・写真: 背景で割らず、全体のレベル補正だけ行う
-      const lo = [255, 255, 255], hi = [0, 0, 0];
-      for (let c = 0; c < 3; c++) {
-        const ch = new Float32Array(w * h);
-        for (let i = 0; i < ch.length; i++) ch[i] = data[i * 4 + c];
-        lo[c] = percentile(ch, 0.01); hi[c] = Math.max(lo[c] + 40, percentile(ch, 0.99));
-      }
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-        const p = (y * w + x) * 4;
-        let r = data[p], g = data[p + 1], bl = data[p + 2];
-        if (mask && mask[y * w + x]) { sampleGrid(bg, gw, gh, bs, x, y, b); r = b[0]; g = b[1]; bl = b[2]; }
-        out[p] = (r - lo[0]) / (hi[0] - lo[0]) * 255;
-        out[p + 1] = (g - lo[1]) / (hi[1] - lo[1]) * 255;
-        out[p + 2] = (bl - lo[2]) / (hi[2] - lo[2]) * 255;
-        out[p + 3] = 255;
-      }
-      const res = { data: out, width: w, height: h };
-      sharpen(res, 0.25);
-      return res;
-    }
-
-    // 影除去なしの場合は紙全体の平均色で割る(色かぶり補正のみ)
-    let gr = 0, gg = 0, gb = 0;
-    if (!opts.shadow) {
-      for (let i = 0; i < gw * gh; i++) { gr += bg[i * 3]; gg += bg[i * 3 + 1]; gb += bg[i * 3 + 2]; }
-      const n = gw * gh; gr /= n; gg /= n; gb /= n;
-    }
-    const white = opts.clean ? (mode === 'color' ? 0.9 : 0.86) : 0.97;
-    const black = mode === 'color' ? 0.18 : 0.28;
-    const span = white - black;
-    const bw = mode === 'bw';
-    const gray = mode === 'gray';
-
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = y * w + x, p = i * 4;
-        if (opts.shadow) sampleGrid(bg, gw, gh, bs, x, y, b); else { b[0] = gr; b[1] = gg; b[2] = gb; }
-        if (mask && mask[i]) { out[p] = out[p + 1] = out[p + 2] = 255; out[p + 3] = 255; continue; }
-        let r = data[p] / Math.max(b[0], 1), g = data[p + 1] / Math.max(b[1], 1), bl = data[p + 2] / Math.max(b[2], 1);
-        if (bw || gray) {
-          const l = 0.299 * r + 0.587 * g + 0.114 * bl;
-          let v;
-          if (bw) v = clamp((l - 0.6) / (0.8 - 0.6), 0, 1);
-          else { v = clamp((l - black) / span, 0, 1); v = Math.pow(v, 1.15); }
-          out[p] = out[p + 1] = out[p + 2] = v * 255;
-        } else {
-          r = clamp((r - black) / span, 0, 1); g = clamp((g - black) / span, 0, 1); bl = clamp((bl - black) / span, 0, 1);
-          out[p] = Math.pow(r, 1.12) * 255; out[p + 1] = Math.pow(g, 1.12) * 255; out[p + 2] = Math.pow(bl, 1.12) * 255;
-        }
-        out[p + 3] = 255;
-      }
-    }
-    const res = { data: out, width: w, height: h };
-    if (!bw) sharpen(res, 0.35);
-    return res;
-  }
-
   // 見開きの綴じ目(中央付近で最も暗い列)を探す
   function findGutter(img) {
     const { data, width: w, height: h } = img;
@@ -544,14 +339,13 @@
     return [crop(img, 0, 0, g, img.height), crop(img, g, 0, img.width - g, img.height)];
   }
 
-  /* 一連の処理: 台形補正 → (見開き分割) → 補正 */
+  /* 一連の処理: 台形補正(切り抜き) → (見開き分割) */
   function processPage(img, cornersNorm, opts, maxSide) {
     const quad = cornersNorm.map(([x, y]) => [x * img.width, y * img.height]);
     const [W, H] = outputSize(quad, maxSide || 2400);
     const warped = warp(img, quad, W, H);
-    const parts = opts.split ? splitSpread(warped) : [warped];
-    return parts.map((p) => enhance(p, opts));
+    return opts.split ? splitSpread(warped) : [warped];
   }
 
-  root.Imaging = { detectQuad, warp, enhance, processPage, homography, outputSize, splitSpread };
+  root.Imaging = { detectQuad, warp, processPage, homography, outputSize, splitSpread };
 })(typeof self !== 'undefined' ? self : this);

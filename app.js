@@ -9,22 +9,18 @@ const icon = (id, cls = '') => `<svg class="ic ${cls}"><use href="#i-${id}"/></s
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const CATS = [
-  { id: 'doc', label: '書類', color: 'var(--sky)', icon: 'file', opts: { mode: 'auto', shadow: true, finger: true, clean: true } },
-  { id: 'book', label: '書籍', color: 'var(--orange)', icon: 'book', opts: { mode: 'auto', shadow: true, finger: true, clean: true } },
-  { id: 'receipt', label: '領収書', color: 'var(--green)', icon: 'receipt', opts: { mode: 'auto', shadow: true, finger: true, clean: true } },
-  { id: 'id', label: '身分証', color: 'var(--purple)', icon: 'idcard', opts: { mode: 'photo', shadow: false, finger: true, clean: false } },
-  { id: 'note', label: 'メモ', color: 'var(--pink)', icon: 'note', opts: { mode: 'color', shadow: true, finger: true, clean: true } },
-  { id: 'other', label: 'その他', color: 'var(--teal)', icon: 'shapes', opts: { mode: 'color', shadow: true, finger: false, clean: false } },
+  { id: 'doc', label: '書類', color: 'var(--sky)', icon: 'file' },
+  { id: 'book', label: '書籍', color: 'var(--orange)', icon: 'book' },
+  { id: 'receipt', label: '領収書', color: 'var(--green)', icon: 'receipt' },
+  { id: 'id', label: '身分証', color: 'var(--purple)', icon: 'idcard' },
+  { id: 'note', label: 'メモ', color: 'var(--pink)', icon: 'note' },
+  { id: 'other', label: 'その他', color: 'var(--teal)', icon: 'shapes' },
 ];
 const catOf = (id) => CATS.find((c) => c.id === id) || CATS[0];
-const MODES = [
-  { id: 'auto', label: '自動補正' }, { id: 'color', label: 'カラー' }, { id: 'gray', label: 'グレー' },
-  { id: 'bw', label: '白黒' }, { id: 'photo', label: '写真' }, { id: 'original', label: '補正なし' },
-];
 
 // ---------------- 設定 ----------------
 const DEFAULTS = {
-  autoCapture: true, category: 'doc', quality: '0.85', maxSide: '2400',
+  autoCapture: true, shutterSound: true, category: 'doc', quality: '0.85', maxSide: '2400',
   autoOCR: true, ocrLang: 'jpn+eng', vertical: false,
   driveClientId: '', driveFolder: 'ClearScan', driveFolderId: '', theme: 'auto', exportFormat: 'pdf',
 };
@@ -151,14 +147,15 @@ const Proc = {
   idle() { return this.busy || this.queue.length ? new Promise((r) => this.idleWaiters.push(r)) : Promise.resolve(); },
 };
 
+// 画像処理のやり方を変えたら上げる(古いページは起動時に作り直す)
+const PROC_VERSION = 2;
 async function processPage(pageId) {
   const page = await DB.get('pages', pageId);
   if (!page) return;
   const img = await loadImage(page.original);
   const src = drawScaled(img, img.naturalWidth, img.naturalHeight, 3200);
   const data = src.getContext('2d').getImageData(0, 0, src.width, src.height);
-  const opts = { ...page.opts, split: !!page.splitWith };
-  const r = await Proc.call(data, page.corners, opts, Number(S.maxSide), page.part || 0);
+  const r = await Proc.call(data, page.corners, { split: !!page.splitWith }, Number(S.maxSide), page.part || 0);
   let out = canvasOf(r.width, r.height);
   out.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
   const rot = ((page.rotation || 0) % 360 + 360) % 360;
@@ -175,6 +172,7 @@ async function processPage(pageId) {
   fresh.thumb = await makeThumb(out);
   fresh.pw = out.width; fresh.ph = out.height;
   fresh.status = 'done';
+  fresh.pv = PROC_VERSION;
   // 画像が変わったら文字認識はやり直し(手で直したテキストは残す)
   if (fresh.ocr && !fresh.ocr.edited) fresh.ocr = null;
   await DB.put('pages', fresh);
@@ -303,8 +301,8 @@ async function refreshDocText(docId) {
 }
 
 /* 1枚の元画像からページを作る(見開き分割なら2ページ) */
-async function addCapture(docId, blob, corners, opts, split) {
-  const base = { docId, original: blob, corners: corners || FULL, opts: { ...opts }, rotation: 0, processed: null, thumb: null, status: 'pending', ocr: null, createdAt: Date.now() };
+async function addCapture(docId, blob, corners, split) {
+  const base = { docId, original: blob, corners: corners || FULL, rotation: 0, processed: null, thumb: null, status: 'pending', ocr: null, createdAt: Date.now() };
   const pages = [];
   if (split) {
     const a = { ...base, id: uid(), part: 0 }, b = { ...base, id: uid(), part: 1 };
@@ -335,7 +333,7 @@ async function importFiles(files, docId) {
       if (f.type && !f.type.startsWith('image/')) throw new Error('not image');
       const img = await loadImage(f);
       const c = drawScaled(img, img.naturalWidth, img.naturalHeight, 3200);
-      ok.push({ blob: await toBlob(c, 0.92), corners: detectOn(c) || FULL });
+      ok.push(await toBlob(c, 0.92));
     } catch (_) { skipped++; }
   }
   if (!ok.length) {
@@ -344,8 +342,7 @@ async function importFiles(files, docId) {
   }
   let doc = docId ? await DB.get('docs', docId) : null;
   if (!doc) doc = await createDoc(S.category);
-  const cat = catOf(doc.category);
-  for (const p of ok) await addCapture(doc.id, p.blob, p.corners, cat.opts, false);
+  for (const blob of ok) await addCapture(doc.id, blob, FULL, false);
   if (skipped) toast(`${skipped}件は画像ではないため読み込みませんでした`, true);
   return doc.id;
 }
@@ -432,7 +429,7 @@ async function renderLibrary() {
         <div class="sticker" style="background:var(--purple);--rot:7deg">${icon('idcard')}</div>
       </div>
       <h2 class="h2">最初の1枚をスキャン</h2>
-      <p>書類・書籍・領収書・身分証・メモ。影や指の映り込みを自動で消して、文字まで検索できるPDFにします。</p>
+      <p>書類・書籍・領収書・身分証・メモ。まっすぐに切り抜いて、文字まで検索できるPDFにします。</p>
     </div>`;
     return;
   }
@@ -465,12 +462,48 @@ $('#fileInput').addEventListener('change', async (e) => {
   else go('doc', { docId: id, tab: 'pages' }, state.screen === 'camera');
 });
 
+// ---------------- シャッター音 ----------------
+// 効果音ファイルを使わず、短いノイズを2回鳴らして「カシャッ」を作る
+const Sound = {
+  ctx: null,
+  unlock() {
+    try {
+      if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (this.ctx.state === 'suspended') this.ctx.resume();
+    } catch (_) { /* 音が出せない環境では何もしない */ }
+  },
+  shutter() {
+    const c = this.ctx;
+    if (!c || c.state !== 'running') return;
+    const t = c.currentTime;
+    const burst = (at, dur, freq, gain) => {
+      const n = Math.floor(c.sampleRate * dur);
+      const buf = c.createBuffer(1, n, c.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 3);
+      const src = c.createBufferSource(); src.buffer = buf;
+      const f = c.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 0.8;
+      const g = c.createGain(); g.gain.value = gain;
+      src.connect(f).connect(g).connect(c.destination);
+      src.start(t + at);
+    };
+    burst(0, 0.03, 3400, 1.1);
+    burst(0.075, 0.08, 1900, 0.9);
+  },
+};
+
 // ---------------- カメラ ----------------
+// 自動撮影のしきい値(8x8 ブロック平均の明るさ差)
+const STILL_T = 5;      // これ未満なら「止まっている」(手ぶれ程度は許容)
+const MOVE_T = 10;      // これを超えたら「ページをめくった/構え直した」
+const HOLD_QUAD = 700;  // 枠が見つかっているとき、この時間(ms)静止で撮影
+const HOLD_FULL = 1200; // 枠が見つからないときは少し長めに待つ
 const Cam = {
-  stream: null, track: null, running: false, timer: 0, quad: null, stableCount: 0, armed: true, moved: true,
+  stream: null, track: null, running: false, timer: 0, quad: null, stillSince: 0, armed: true, moved: true,
   prevGray: null, docId: null, count: 0, cat: S.category, split: false, busy: false, torch: false,
   async start(docId) {
-    this.docId = docId; this.count = 0; this.quad = null; this.armed = true; this.moved = true; this.stableCount = 0;
+    Sound.unlock();
+    this.docId = docId; this.count = 0; this.quad = null; this.armed = true; this.moved = true; this.stillSince = 0; this.prevBlocks = null;
     if (docId) { const d = await DB.get('docs', docId); if (d) this.cat = d.category; }
     else this.cat = S.category;
     this.renderCats(); this.renderAuto(); this.updateThumb(null);
@@ -526,50 +559,63 @@ const Cam = {
     ctx.drawImage(v, 0, 0, c.width, c.height);
     return ctx.getImageData(0, 0, c.width, c.height);
   },
+  // 8x8 ピクセルごとの平均明るさ。細かい文字の揺れに左右されず、大きな動きだけを捉える
+  blocks(frame) {
+    const { data, width: w, height: h } = frame, B = 8;
+    const bw = Math.floor(w / B), bh = Math.floor(h / B), out = new Float32Array(bw * bh);
+    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+      let sum = 0;
+      for (let y = by * B; y < by * B + B; y++) for (let x = bx * B; x < bx * B + B; x++) sum += data[(y * w + x) * 4 + 1];
+      out[by * bw + bx] = sum / (B * B);
+    }
+    return out;
+  },
   loop() {
     if (!this.running) return;
     const v = $('#camVideo');
     if (v.videoWidth) {
       const t0 = performance.now();
       const frame = this.frameGray(v);
-      // 動き量(ページめくり検出)
-      const g = new Uint8Array(frame.width * frame.height);
-      for (let i = 0; i < g.length; i++) g[i] = frame.data[i * 4 + 1];
-      let motion = 0;
-      if (this.prevGray && this.prevGray.length === g.length) {
-        let s = 0; for (let i = 0; i < g.length; i += 3) s += Math.abs(g[i] - this.prevGray[i]);
-        motion = s / (g.length / 3);
+      // 動き量: 手ぶれ程度なら小さく、ページめくり・構え直しで大きくなる
+      const bl = this.blocks(frame);
+      let motion = 99;
+      if (this.prevBlocks && this.prevBlocks.length === bl.length) {
+        let sum = 0;
+        for (let i = 0; i < bl.length; i++) sum += Math.abs(bl[i] - this.prevBlocks[i]);
+        motion = sum / bl.length;
       }
-      this.prevGray = g;
-      if (motion > 9) this.moved = true;
+      this.prevBlocks = bl;
+      // 静止の判定は少しならして、一瞬の揺れでやり直しにならないようにする
+      this.motion = motion > 50 ? motion : (this.motion || 0) * 0.5 + motion * 0.5;
+      if (motion > MOVE_T) this.moved = true;
+      if (this.motion < STILL_T) { if (!this.stillSince) this.stillSince = t0; } else this.stillSince = 0;
 
+      // 枠は見つかれば切り抜きに使う(見つからなくても撮影はできる)
       const r = Imaging.detectQuad(frame);
       if (r) {
         const q = r.corners;
-        if (this.quad) {
-          const d = Math.max(...q.map((p, i) => Math.hypot(p[0] - this.quad[i][0], p[1] - this.quad[i][1])));
-          this.stableCount = d < 0.025 && motion < 6 ? this.stableCount + 1 : 0;
-          this.quad = q.map((p, i) => [this.quad[i][0] * 0.4 + p[0] * 0.6, this.quad[i][1] * 0.4 + p[1] * 0.6]);
-        } else { this.quad = q; this.stableCount = 0; }
+        this.quad = this.quad ? q.map((p, i) => [this.quad[i][0] * 0.5 + p[0] * 0.5, this.quad[i][1] * 0.5 + p[1] * 0.5]) : q;
         this.lost = 0;
-      } else {
-        this.lost = (this.lost || 0) + 1;
-        if (this.lost > 2) { this.quad = null; this.stableCount = 0; this.moved = true; }
-      }
-      this.draw();
+      } else if (++this.lost > 3) this.quad = null;
+
+      const hold = this.quad ? HOLD_QUAD : HOLD_FULL;
+      const still = this.stillSince ? (t0 - this.stillSince) / hold : 0;
+      const ready = S.autoCapture && this.armed && this.moved;
+      $('#camShutter').style.setProperty('--p', ready ? Math.min(1, still).toFixed(3) : 0);
+      this.draw(ready && still > 0.3);
       if (!this.busy) {
-        if (!this.quad) this.status('書類を画面に入れてください');
-        else if (S.autoCapture && !(this.armed && this.moved)) this.status('次のページへ');
-        else if (S.autoCapture) this.status(this.stableCount >= 2 ? '撮影します' : 'そのまま動かさないで');
-        else this.status('シャッターを押してください');
+        if (!S.autoCapture) this.status(this.quad ? 'シャッターを押してください' : '枠が出ないときは全体を撮影します');
+        else if (!ready) this.status('次のページへ(めくると撮影待ちに戻ります)');
+        else if (still > 0) this.status(this.quad ? 'そのまま…' : 'そのまま…(全体を撮影します)');
+        else this.status('カメラを止めて構えてください');
       }
-      if (S.autoCapture && this.quad && this.armed && this.moved && this.stableCount >= 3 && !this.busy) this.capture(true);
-      this.timer = setTimeout(() => this.loop(), Math.max(60, 180 - (performance.now() - t0)));
+      if (ready && still >= 1 && !this.busy) this.capture(true);
+      this.timer = setTimeout(() => this.loop(), Math.max(50, 150 - (performance.now() - t0)));
     } else {
       this.timer = setTimeout(() => this.loop(), 120);
     }
   },
-  draw() {
+  draw(ready) {
     const v = $('#camVideo'), c = $('#camOverlay');
     const dpr = window.devicePixelRatio || 1;
     const cw = c.clientWidth, ch = c.clientHeight;
@@ -581,7 +627,6 @@ const Cam = {
     const s = Math.max(cw / v.videoWidth, ch / v.videoHeight);
     const dx = (cw - v.videoWidth * s) / 2, dy = (ch - v.videoHeight * s) / 2;
     const pts = this.quad.map(([x, y]) => [x * v.videoWidth * s + dx, y * v.videoHeight * s + dy]);
-    const ready = this.stableCount >= 2;
     ctx.beginPath();
     pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
     ctx.closePath();
@@ -601,14 +646,15 @@ const Cam = {
       const fl = $('#camFlash'); fl.classList.remove('go'); void fl.offsetWidth; fl.classList.add('go');
       if (navigator.vibrate) navigator.vibrate(15);
       const c = drawScaled(v, v.videoWidth, v.videoHeight, 3200);
-      const corners = this.quad ? this.quad.map((p) => [...p]) : (detectOn(c) || FULL);
+      const corners = this.quad ? this.quad.map((p) => [...p]) : FULL;
       const blob = await toBlob(c, 0.92);
       if (!this.docId) this.docId = (await createDoc(this.cat)).id;
-      const pages = await addCapture(this.docId, blob, corners, catOf(this.cat).opts, this.cat === 'book' && this.split);
+      const pages = await addCapture(this.docId, blob, corners, this.cat === 'book' && this.split);
       this.count += pages.length;
+      if (S.shutterSound) Sound.shutter();
       this.updateThumb(c);
       this.status(auto ? '撮影しました ・ 次のページへ' : '撮影しました');
-      this.armed = false; this.moved = false; this.stableCount = 0;
+      this.armed = false; this.moved = false; this.stillSince = 0;
       // 少し待ってから次の自動撮影を受け付ける
       setTimeout(() => { this.armed = true; }, 900);
     } catch (err) {
@@ -646,7 +692,7 @@ $('#camTorch').addEventListener('click', async () => {
   try { await Cam.track.applyConstraints({ advanced: [{ torch: Cam.torch }] }); } catch (_) { Cam.torch = false; }
   $('#camTorch').classList.toggle('on', Cam.torch);
 });
-$('#camShutter').addEventListener('click', () => Cam.capture(false));
+$('#camShutter').addEventListener('click', () => { Sound.unlock(); Cam.capture(false); });
 $('#camDone').addEventListener('click', () => Cam.finish());
 $('#camThumb').addEventListener('click', () => Cam.finish());
 $('#camClose').addEventListener('click', () => Cam.finish());
@@ -777,11 +823,11 @@ OCR.listeners.add(() => {
 
 // ---------------- ページ編集 ----------------
 const Editor = {
-  page: null, tab: 'enhance', corners: null, img: null, dirty: false,
+  page: null, tab: 'view', corners: null, img: null, dirty: false,
   async open(pageId) {
     const page = await DB.get('pages', pageId);
     if (!page) { back(); return; }
-    this.page = page; this.tab = 'enhance'; this.corners = page.corners.map((p) => [...p]);
+    this.page = page; this.tab = 'view'; this.corners = page.corners.map((p) => [...p]);
     const doc = await DB.get('docs', page.docId);
     const idx = doc ? doc.pageIds.indexOf(page.id) : 0;
     $('#editTitle').textContent = `ページ ${idx + 1} / ${doc ? doc.pageIds.length : 1}`;
@@ -805,12 +851,7 @@ const Editor = {
     this.fit();
   },
   syncControls() {
-    const o = this.page.opts;
-    $('#modeChips').innerHTML = MODES.map((m) => `<button class="chip ${o.mode === m.id ? 'on' : ''}" data-m="${m.id}">${m.label}</button>`).join('');
-    $('#optShadow').checked = !!o.shadow; $('#optFinger').checked = !!o.finger; $('#optClean').checked = !!o.clean;
     $('#optSplit').checked = !!this.page.splitWith;
-    const disabled = o.mode === 'original';
-    ['#optShadow', '#optFinger', '#optClean'].forEach((s) => { $(s).disabled = disabled; $(s).closest('.toggle-row').style.opacity = disabled ? .45 : 1; });
   },
   async showTab() {
     $$('#editTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === this.tab));
@@ -841,14 +882,14 @@ const Editor = {
     await DB.put('pages', this.page);
     if (this.page.splitWith) {
       const sib = await DB.get('pages', this.page.splitWith);
-      if (sib) { sib.corners = this.page.corners; sib.opts = { ...this.page.opts }; await DB.put('pages', sib); if (reprocess) Proc.enqueue(sib.id); }
+      if (sib) { sib.corners = this.page.corners; await DB.put('pages', sib); if (reprocess) Proc.enqueue(sib.id); }
     }
     await touchDoc(this.page.docId);
     if (reprocess) { Proc.enqueue(this.page.id); this.showProcessed(); }
   },
   async reload() {
     const p = await DB.get('pages', this.page.id);
-    if (p) { this.page = p; if (this.tab === 'enhance') this.showProcessed(); }
+    if (p) { this.page = p; if (this.tab === 'view') this.showProcessed(); }
   },
 };
 Proc.listeners.add((id) => { if (state.screen === 'edit' && Editor.page && Editor.page.id === id) Editor.reload(); });
@@ -856,14 +897,6 @@ $('#editTabs').addEventListener('click', (e) => {
   const b = e.target.closest('[data-tab]'); if (!b || b.dataset.tab === Editor.tab) return;
   if (Editor.tab === 'crop' && Editor.dirty) applyCrop();
   Editor.tab = b.dataset.tab; Editor.showTab();
-});
-$('#modeChips').addEventListener('click', (e) => {
-  const b = e.target.closest('[data-m]'); if (!b) return;
-  Editor.page.opts.mode = b.dataset.m;
-  Editor.syncControls(); Editor.save();
-});
-[['#optShadow', 'shadow'], ['#optFinger', 'finger'], ['#optClean', 'clean']].forEach(([sel, key]) => {
-  $(sel).addEventListener('change', (e) => { Editor.page.opts[key] = e.target.checked; Editor.save(); });
 });
 $('#optSplit').addEventListener('change', async (e) => {
   const p = Editor.page;
@@ -935,7 +968,7 @@ async function applyCrop() {
   Editor.dirty = false;
   await Editor.save();
 }
-$('#cropApply').addEventListener('click', async () => { await applyCrop(); Editor.tab = 'enhance'; Editor.showTab(); });
+$('#cropApply').addEventListener('click', async () => { await applyCrop(); Editor.tab = 'view'; Editor.showTab(); });
 $('#cropFull').addEventListener('click', () => { Editor.corners = FULL.map((p) => [...p]); Editor.dirty = true; Editor.drawCrop(); });
 $('#cropAuto').addEventListener('click', async () => {
   const img = await loadImage(Editor.page.original);
@@ -1093,7 +1126,7 @@ $('#driveTest').addEventListener('click', async () => {
   Proc.init();
   // 前回の処理が途中だったページを再開
   const pages = await DB.all('pages');
-  pages.filter((p) => p.status !== 'done').forEach((p) => Proc.enqueue(p.id));
+  pages.filter((p) => p.status !== 'done' || p.pv !== PROC_VERSION).forEach((p) => Proc.enqueue(p.id));
   history.replaceState({ screen: 'library' }, '');
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

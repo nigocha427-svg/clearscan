@@ -7,7 +7,7 @@
 |---|---|
 | index.html | 画面の骨組みとデザイン(Notion風の配色・文字) |
 | app.js | 画面遷移・カメラ・保存(IndexedDB `clearscan`)・文字認識・書き出し |
-| imaging.js | 枠検出・台形補正・影/ムラ除去・指の消去・汚れ/折り目除去・見開き分割 |
+| imaging.js | 枠検出・台形補正(切り抜き)・見開き分割(画像の補正はしない) |
 | worker.js | imaging.js を画面の裏で動かすワーカー |
 | pdf.js | 画像の上に透明テキストを重ねた「検索できるPDF」を作成 |
 | drive.js | Google Drive への保存(drive.file スコープ) |

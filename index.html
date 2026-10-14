@@ -267,7 +267,10 @@ mark { background: rgba(255, 212, 0, .45); color: inherit; border-radius: 2px; p
 .shutter { width: 74px; height: 74px; border-radius: 50%; border: 4px solid #fff; display: grid; place-items: center; }
 .shutter span { width: 58px; height: 58px; border-radius: 50%; background: #fff; transition: transform .12s; }
 .shutter:active span { transform: scale(.88); }
-.shutter.auto span { background: var(--primary); box-shadow: 0 0 0 3px rgba(35,131,226,.25); }
+.shutter { position: relative; }
+.shutter.auto span { background: var(--primary); }
+.shutter.auto::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; background: conic-gradient(#fff calc(var(--p, 0) * 1turn), rgba(255,255,255,.25) 0); -webkit-mask: radial-gradient(circle, transparent 33px, #000 34px); mask: radial-gradient(circle, transparent 33px, #000 34px); }
+.shutter.auto { border-color: transparent; }
 .cam-thumb { justify-self: start; position: relative; width: 50px; height: 64px; border-radius: 8px; overflow: hidden; background: rgba(255,255,255,.08); border: 1.5px solid rgba(255,255,255,.7); visibility: hidden; }
 .cam-thumb.show { visibility: visible; }
 .cam-thumb img { width: 100%; height: 100%; object-fit: cover; }
@@ -299,7 +302,7 @@ mark { background: rgba(255, 212, 0, .45); color: inherit; border-radius: 2px; p
 .edit-actions .danger { color: var(--danger); }
 .crop-actions { display: none; gap: 8px; margin-top: 12px; }
 .crop-mode .crop-actions { display: flex; }
-.crop-mode .enhance-only { display: none; }
+.crop-mode .view-only { display: none; }
 
 /* ---------- シート ---------- */
 .scrim { position: fixed; inset: 0; z-index: 50; background: rgba(15, 15, 15, .4); display: none; align-items: flex-end; justify-content: center; }
@@ -484,14 +487,10 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
     </div>
   </div>
   <div class="panel" id="editPanel">
-    <div class="seg" id="editTabs"><button data-tab="enhance" class="on"><svg class="ic sm" style="margin-right:6px;vertical-align:-3px"><use href="#i-sparkle"/></svg>補正</button><button data-tab="crop"><svg class="ic sm" style="margin-right:6px;vertical-align:-3px"><use href="#i-crop"/></svg>切り抜き</button></div>
-    <div class="enhance-only">
-      <div class="chips" id="modeChips"></div>
-      <div class="toggles">
-        <label class="toggle-row"><span class="lbl">影・ムラを除去<small>照明の影や紙の黄ばみを均一な白に</small></span><span class="switch"><input type="checkbox" id="optShadow"><span></span></span></label>
-        <label class="toggle-row"><span class="lbl">指の映り込みを消去<small>端から写り込んだ指を紙の色で塗りつぶし</small></span><span class="switch"><input type="checkbox" id="optFinger"><span></span></span></label>
-        <label class="toggle-row"><span class="lbl">汚れ・折り目を除去<small>薄いシミや折り目の線を飛ばして文字だけを残す</small></span><span class="switch"><input type="checkbox" id="optClean"><span></span></span></label>
-        <label class="toggle-row" id="splitRow"><span class="lbl">見開きを2ページに分割<small>綴じ目を自動で見つけて左右に分けます</small></span><span class="switch"><input type="checkbox" id="optSplit"><span></span></span></label>
+    <div class="seg" id="editTabs"><button data-tab="view" class="on"><svg class="ic sm" style="margin-right:6px;vertical-align:-3px"><use href="#i-file"/></svg>ページ</button><button data-tab="crop"><svg class="ic sm" style="margin-right:6px;vertical-align:-3px"><use href="#i-crop"/></svg>切り抜き</button></div>
+    <div class="view-only">
+      <div class="toggles" id="splitRow">
+        <label class="toggle-row"><span class="lbl">見開きを2ページに分割<small>綴じ目を自動で見つけて左右に分けます</small></span><span class="switch"><input type="checkbox" id="optSplit"><span></span></span></label>
       </div>
       <div class="edit-actions">
         <button class="btn-utility" id="editRotate"><svg class="ic sm"><use href="#i-rotate"/></svg>回転</button>
@@ -521,7 +520,8 @@ details.guide code { font-size: 12.5px; background: var(--fill); padding: 1px 5p
     <div class="set-group">
       <div class="eyebrow">スキャン</div>
       <div class="card set-card">
-        <label class="set-row"><span class="lbl">自動撮影<small>書類が静止したら自動でシャッター。ページをめくると次を待ちます</small></span><span class="switch"><input type="checkbox" data-set="autoCapture"><span></span></span></label>
+        <label class="set-row"><span class="lbl">自動撮影<small>カメラを構えて静止すると自動でシャッター。ページをめくると次を待ちます</small></span><span class="switch"><input type="checkbox" data-set="autoCapture"><span></span></span></label>
+        <label class="set-row"><span class="lbl">シャッター音<small>撮影に成功したときに鳴らします(消音モード中は鳴りません)</small></span><span class="switch"><input type="checkbox" data-set="shutterSound"><span></span></span></label>
         <label class="set-row"><span class="lbl">画質</span><select data-set="quality"><option value="0.75">標準(軽い)</option><option value="0.85">高画質</option><option value="0.93">最高</option></select></label>
         <label class="set-row"><span class="lbl">解像度<small>長辺のピクセル数</small></span><select data-set="maxSide"><option value="1800">1800px</option><option value="2400">2400px</option><option value="3200">3200px</option></select></label>
       </div>
