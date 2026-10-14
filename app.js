@@ -7,14 +7,16 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = (id, cls = '') => `<svg class="ic ${cls}"><use href="#i-${id}"/></svg>`;
 
-const CATS = [
-  { id: 'doc', label: '書類', color: 'var(--sky)', icon: 'file' },
-  { id: 'book', label: '書籍', color: 'var(--orange)', icon: 'book' },
-  { id: 'receipt', label: '領収書', color: 'var(--green)', icon: 'receipt' },
-  { id: 'id', label: '身分証', color: 'var(--purple)', icon: 'idcard' },
-  { id: 'note', label: 'メモ', color: 'var(--pink)', icon: 'note' },
-  { id: 'other', label: 'その他', color: 'var(--teal)', icon: 'shapes' },
+// タグ(ドキュメントの分類)。名前・色・数は設定画面で自由に変えられる
+const DEFAULT_CATS = [
+  { id: 'doc', label: '書類', color: 'var(--sky)' },
+  { id: 'book', label: '書籍', color: 'var(--orange)' },
+  { id: 'receipt', label: '領収書', color: 'var(--green)' },
+  { id: 'id', label: '身分証', color: 'var(--purple)' },
+  { id: 'note', label: 'メモ', color: 'var(--pink)' },
+  { id: 'other', label: 'その他', color: 'var(--teal)' },
 ];
+const TAG_COLORS = ['var(--sky)', 'var(--orange)', 'var(--green)', 'var(--purple)', 'var(--pink)', 'var(--teal)', 'var(--brown)', 'var(--faint)'];
 const catOf = (id) => CATS.find((c) => c.id === id) || CATS[0];
 
 // ---------------- 設定 ----------------
@@ -29,6 +31,8 @@ const S = (() => {
   if (!['pdf', 'jpg'].includes(merged.exportFormat)) merged.exportFormat = 'pdf';
   return merged;
 })();
+let CATS = Array.isArray(S.cats) && S.cats.length ? S.cats : DEFAULT_CATS.map((c) => ({ ...c }));
+function saveCats() { S.cats = CATS; saveSettings(); }
 function saveSettings() { try { localStorage.setItem('clearscan-settings', JSON.stringify(S)); } catch (_) { /* 保存できなくても動作は続ける */ } }
 function applyTheme() {
   if (S.theme === 'auto') document.documentElement.removeAttribute('data-theme');
@@ -308,7 +312,8 @@ async function renderLibrary() {
   const docs = (await DB.all('docs')).sort((a, b) => b.updatedAt - a.updatedAt);
   $('#libCount').textContent = docs.length ? `${docs.length}件のドキュメント` : '';
   $('#libFilters').innerHTML = [`<button class="chip ${state.filter === 'all' ? 'on' : ''}" data-f="all">すべて</button>`]
-    .concat(CATS.map((c) => `<button class="chip ${state.filter === c.id ? 'on' : ''}" data-f="${c.id}"><span class="dot" style="background:${c.color}"></span>${c.label}</button>`)).join('');
+    .concat(CATS.map((c) => `<button class="chip ${state.filter === c.id ? 'on' : ''}" data-f="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.label)}</button>`))
+    .concat(`<button class="chip chip-edit" data-edit-tags>${icon('edit', 'sm')}タグを編集</button>`).join('');
   const q = norm($('#libSearch').value.trim());
   const list = docs.filter((d) => (state.filter === 'all' || d.category === state.filter) && (!q || norm(d.title).includes(q)));
   const el = $('#libList');
@@ -332,11 +337,14 @@ async function renderLibrary() {
     return `<button class="doc-card" data-id="${d.id}" style="animation-delay:${Math.min(i, 10) * 30}ms">
       <div class="thumb">${cover}<div class="pages"><span class="badge">${d.pageIds.length}ページ</span></div></div>
       <div class="name">${highlight(d.title, q)}</div>
-      <div class="meta"><span class="dot" style="background:${c.color}"></span>${c.label} · ${fmtDate(d.updatedAt)}</div>
+      <div class="meta"><span class="dot" style="background:${c.color}"></span>${esc(c.label)} · ${fmtDate(d.updatedAt)}</div>
     </button>`;
   }).join('')}</div>`;
 }
-$('#libFilters').addEventListener('click', (e) => { const b = e.target.closest('[data-f]'); if (b) { state.filter = b.dataset.f; renderLibrary(); } });
+$('#libFilters').addEventListener('click', (e) => {
+  if (e.target.closest('[data-edit-tags]')) { go('settings'); return; }
+  const b = e.target.closest('[data-f]'); if (b) { state.filter = b.dataset.f; renderLibrary(); }
+});
 $('#libSearch').addEventListener('input', () => renderLibrary());
 // 一覧をスクロールしたら、固定した見出し部分の下に区切り線を出す
 window.addEventListener('scroll', () => { $('#libSticky').classList.toggle('scrolled', state.screen === 'library' && window.scrollY > 4); }, { passive: true });
@@ -473,8 +481,7 @@ const Cam = {
   },
   status(t) { $('#camStatus').textContent = t; },
   renderCats() {
-    $('#camCats').innerHTML = CATS.map((c) => `<button data-c="${c.id}" class="${c.id === this.cat ? 'on' : ''}">${c.label}</button>`).join('');
-    $('#camSplit').hidden = this.cat !== 'book';
+    $('#camCats').innerHTML = CATS.map((c) => `<button data-c="${c.id}" class="${c.id === this.cat ? 'on' : ''}">${esc(c.label)}</button>`).join('');
     $('#camSplit').classList.toggle('on', this.split);
   },
   renderAuto() {
@@ -581,7 +588,7 @@ const Cam = {
       const blob = await toBlob(c, 0.92);
       if (!this.docId) this.docId = (await createDoc(this.cat)).id;
       const rot = Tilt.current();
-      const pages = await addCapture(this.docId, blob, corners, this.cat === 'book' && this.split, rot);
+      const pages = await addCapture(this.docId, blob, corners, this.split, rot);
       this.count += pages.length;
       if (S.shutterSound) Sound.shutter();
       this.updateThumb(c, rot);
@@ -652,7 +659,7 @@ async function renderDoc() {
   const cs = $('#docCat');
   $('.dot', cs).style.background = c.color;
   $('span:nth-child(2)', cs).textContent = c.label;
-  $('select', cs).innerHTML = CATS.map((x) => `<option value="${x.id}" ${x.id === doc.category ? 'selected' : ''}>${x.label}</option>`).join('');
+  $('select', cs).innerHTML = CATS.map((x) => `<option value="${x.id}" ${x.id === doc.category ? 'selected' : ''}>${esc(x.label)}</option>`).join('');
   $('#docInfo').textContent = `${pages.length}ページ · ${fmtDate(doc.createdAt)}`;
   $('#docPages').innerHTML = pages.map((p, i) => {
     const img = p.thumb ? `<img src="${blobURL('thumb:' + p.id, p.thumb)}" alt="">` : `<div class="stack"><div class="spinner"></div></div>`;
@@ -696,7 +703,6 @@ const Editor = {
     const doc = await DB.get('docs', page.docId);
     const idx = doc ? doc.pageIds.indexOf(page.id) : 0;
     $('#editTitle').textContent = `ページ ${idx + 1} / ${doc ? doc.pageIds.length : 1}`;
-    $('#splitRow').hidden = !(doc && doc.category === 'book') && !page.splitWith;
     this.syncControls();
     this.showTab();
   },
@@ -937,7 +943,58 @@ $('#exportShare').addEventListener('click', () => Export.share());
 $('#exportDrive').addEventListener('click', () => Export.drive());
 
 // ---------------- 設定 ----------------
+async function renderTags() {
+  const counts = {};
+  for (const d of await DB.all('docs')) { const id = catOf(d.category).id; counts[id] = (counts[id] || 0) + 1; }
+  $('#tagList').innerHTML = CATS.map((c, i) => `<div class="tag-row" data-i="${i}">
+      <button class="tag-color" data-act="color" style="background:${c.color}" aria-label="色を変える"></button>
+      <input class="tag-name" data-act="name" value="${esc(c.label)}" maxlength="20" aria-label="タグ名" enterkeyhint="done">
+      <span class="caption">${counts[c.id] || 0}件</span>
+      <button class="icon-btn" data-act="del" aria-label="削除"${CATS.length <= 1 ? ' disabled style="opacity:.3"' : ''}>${icon('trash', 'sm')}</button>
+    </div>`).join('');
+}
+$('#tagList').addEventListener('click', async (e) => {
+  const row = e.target.closest('.tag-row'); if (!row) return;
+  const i = Number(row.dataset.i), c = CATS[i];
+  const act = e.target.closest('[data-act]') && e.target.closest('[data-act]').dataset.act;
+  if (act === 'color') {
+    c.color = TAG_COLORS[(TAG_COLORS.indexOf(c.color) + 1) % TAG_COLORS.length];
+    saveCats(); renderTags();
+  } else if (act === 'del') {
+    if (CATS.length <= 1) return;
+    const docs = (await DB.all('docs')).filter((d) => catOf(d.category).id === c.id);
+    const to = CATS.find((x) => x.id !== c.id);
+    const msg = docs.length ? `タグ「${c.label}」を削除しますか?\nこのタグのドキュメント${docs.length}件は「${to.label}」に移ります。` : `タグ「${c.label}」を削除しますか?`;
+    if (!confirm(msg)) return;
+    CATS.splice(i, 1);
+    saveCats();
+    for (const d of docs) { d.category = to.id; await DB.put('docs', d); }
+    if (S.category === c.id) { S.category = CATS[0].id; saveSettings(); }
+    if (state.filter === c.id) state.filter = 'all';
+    renderTags();
+    toast(`タグ「${c.label}」を削除しました`);
+  }
+});
+$('#tagList').addEventListener('change', (e) => {
+  const input = e.target.closest('.tag-name'); if (!input) return;
+  const c = CATS[Number(input.closest('.tag-row').dataset.i)];
+  const v = input.value.trim();
+  if (!v) { input.value = c.label; return; }
+  c.label = v; saveCats();
+});
+$('#tagList').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.closest('.tag-name')) e.target.blur(); });
+$('#tagAdd').addEventListener('click', async () => {
+  const used = new Set(CATS.map((c) => c.color));
+  const color = TAG_COLORS.find((x) => !used.has(x)) || TAG_COLORS[CATS.length % TAG_COLORS.length];
+  CATS.push({ id: 't' + uid(), label: '新しいタグ', color });
+  saveCats();
+  await renderTags();
+  const inp = $('#tagList .tag-name').pop();
+  inp.focus(); inp.select();
+});
+
 async function renderSettings() {
+  renderTags();
   $$('[data-set]').forEach((el) => {
     const k = el.dataset.set;
     if (el.type === 'checkbox') el.checked = !!S[k]; else el.value = S[k];
