@@ -13,10 +13,13 @@
 | drive.js | Google Drive への保存(drive.file スコープ) |
 | sw.js | オフライン用キャッシュ(更新時は `CACHE` の番号を上げる) |
 
+## 公開
+https://nigocha427-svg.github.io/clearscan/ (リポジトリ nigocha427-svg/clearscan、main ブランチ直下)。
+更新は commit → `git push`。リリースごとに sw.js の `CACHE` を上げる。
+
 ## 確認
-`.claude/launch.json` の `clearscan`(http://localhost:5294)。
-カメラは https か localhost でのみ動作。iPhone で使うには GitHub Pages などの https に公開する。
+`.claude/launch.json` の `clearscan`(http://localhost:5294)。カメラは https か localhost でのみ動作。
 
 ## 外部ライブラリ
-- 文字認識: tesseract.js 5.1.1(jsDelivr から初回のみ読み込み)
-- Google ログイン: Google Identity Services
+- 文字認識: tesseract.js 5.1.1 / tesseract.js-core 5.1.1 / 認識データ 4.0.0_best_int(jpn, eng, jpn_vert)を `vendor/tesseract/` に同梱(Apache-2.0)。外部CDNは使わない
+- Google ログイン: Google Identity Services(Google から読み込み)
