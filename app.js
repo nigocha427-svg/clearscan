@@ -338,6 +338,8 @@ async function renderLibrary() {
 }
 $('#libFilters').addEventListener('click', (e) => { const b = e.target.closest('[data-f]'); if (b) { state.filter = b.dataset.f; renderLibrary(); } });
 $('#libSearch').addEventListener('input', () => renderLibrary());
+// 一覧をスクロールしたら、固定した見出し部分の下に区切り線を出す
+window.addEventListener('scroll', () => { $('#libSticky').classList.toggle('scrolled', state.screen === 'library' && window.scrollY > 4); }, { passive: true });
 $('#libList').addEventListener('click', (e) => { const c = e.target.closest('.doc-card'); if (c) go('doc', { docId: c.dataset.id }); });
 $('#scanBtn').addEventListener('click', () => { Tilt.request(); go('camera', { docId: null }); });
 $('#openSettings').addEventListener('click', () => go('settings'));
