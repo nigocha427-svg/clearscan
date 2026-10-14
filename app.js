@@ -218,6 +218,20 @@ const OCR = {
     this.lang = lang;
     return this.worker;
   },
+  // 文字が横倒しなら、ページ自体を回転させて作り直す(1ページにつき最初の1回だけ)
+  async orient(page) {
+    const w = await this.getWorker();
+    this.status = '文字の向きを確認中…'; this.notify();
+    const rot = await detectRotation(page, w);
+    const fresh = await DB.get('pages', page.id);
+    if (!fresh) return null;
+    fresh.oriented = true;
+    if (rot) fresh.rotation = ((fresh.rotation || 0) + rot) % 360;
+    await DB.put('pages', fresh);
+    if (rot) await processPage(page.id);
+    this.status = '文字を認識中…'; this.notify();
+    return DB.get('pages', page.id);
+  },
   async pump() {
     if (this.busy) return;
     this.busy = true;
@@ -227,7 +241,8 @@ const OCR = {
       const id = this.queue.shift();
       this.current = id; this.progress = 0; this.notify();
       try {
-        const page = await DB.get('pages', id);
+        let page = await DB.get('pages', id);
+        if (page && page.processed && !page.oriented) page = await this.orient(page);
         if (page && page.processed) {
           const w = await this.getWorker();
           const { data } = await w.recognize(page.processed);
@@ -252,6 +267,34 @@ const OCR = {
     this.busy = false; this.status = ''; this.notify();
   },
 };
+/* 文字の向きを調べ、正しい向きにするための時計回りの回転角(0/90/270)を返す。
+ * ページ中央を試しに読み、読み取りの確からしさ(confidence)が一番高い向きを選ぶ。
+ * そのままの向きで十分に読めれば、回転の試し読みは省く。 */
+async function detectRotation(page, worker) {
+  const img = await loadImage(page.processed);
+  const c = drawScaled(img, img.naturalWidth, img.naturalHeight, 1200);
+  const w = c.width, h = c.height;
+  const cw = Math.round(w * 0.6), ch = Math.round(h * 0.6);
+  const center = canvasOf(cw, ch);
+  center.getContext('2d').drawImage(c, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, cw, ch);
+  const score = async (deg) => {
+    let target = center;
+    if (deg) {
+      target = canvasOf(ch, cw);
+      const ctx = target.getContext('2d');
+      ctx.translate(ch / 2, cw / 2); ctx.rotate(deg * Math.PI / 180); ctx.drawImage(center, -cw / 2, -ch / 2);
+    }
+    const { data } = await worker.recognize(target);
+    return data.confidence || 0;
+  };
+  const upright = await score(0);
+  if (upright >= 60) return 0;
+  const r90 = await score(90), r270 = await score(270);
+  const best = r90 >= r270 ? 90 : 270;
+  // 回した方がはっきり良く読めるときだけ回転する
+  return Math.max(r90, r270) > upright + 10 ? best : 0;
+}
+
 // 日本語の文字間に入る余分な空白を取り除く
 function cleanText(s) {
   // Tesseract は円記号を \ と読むことがある
@@ -496,8 +539,7 @@ const Sound = {
 // 自動撮影のしきい値(8x8 ブロック平均の明るさ差)
 const STILL_T = 5;      // これ未満なら「止まっている」(手ぶれ程度は許容)
 const MOVE_T = 10;      // これを超えたら「ページをめくった/構え直した」
-const HOLD_QUAD = 700;  // 枠が見つかっているとき、この時間(ms)静止で撮影
-const HOLD_FULL = 1200; // 枠が見つからないときは少し長めに待つ
+const HOLD_QUAD = 700;  // 枠が見つかっている状態で、この時間(ms)静止したら撮影
 const Cam = {
   stream: null, track: null, running: false, timer: 0, quad: null, stillSince: 0, armed: true, moved: true,
   prevGray: null, docId: null, count: 0, cat: S.category, split: false, busy: false, torch: false,
@@ -598,18 +640,19 @@ const Cam = {
         this.lost = 0;
       } else if (++this.lost > 3) this.quad = null;
 
-      const hold = this.quad ? HOLD_QUAD : HOLD_FULL;
-      const still = this.stillSince ? (t0 - this.stillSince) / hold : 0;
+      // 枠の外まで写った写真にならないよう、自動撮影は枠が見つかったときだけ
+      const still = this.stillSince ? (t0 - this.stillSince) / HOLD_QUAD : 0;
       const ready = S.autoCapture && this.armed && this.moved;
-      $('#camShutter').style.setProperty('--p', ready ? Math.min(1, still).toFixed(3) : 0);
-      this.draw(ready && still > 0.3);
+      const go = ready && !!this.quad;
+      $('#camShutter').style.setProperty('--p', go ? Math.min(1, still).toFixed(3) : 0);
+      this.draw(go && still > 0.3);
       if (!this.busy) {
-        if (!S.autoCapture) this.status(this.quad ? 'シャッターを押してください' : '枠が出ないときは全体を撮影します');
-        else if (!ready) this.status('次のページへ(めくると撮影待ちに戻ります)');
-        else if (still > 0) this.status(this.quad ? 'そのまま…' : 'そのまま…(全体を撮影します)');
-        else this.status('カメラを止めて構えてください');
+        if (!ready && S.autoCapture) this.status('次のページへ(めくると撮影待ちに戻ります)');
+        else if (!this.quad) this.status(still > 0 ? '枠が見つかりません ・ 書類に近づいてください' : '書類を画面に入れてください');
+        else if (!S.autoCapture) this.status('シャッターを押してください');
+        else this.status(still > 0 ? 'そのまま…' : 'カメラを止めて構えてください');
       }
-      if (ready && still >= 1 && !this.busy) this.capture(true);
+      if (go && still >= 1 && !this.busy) this.capture(true);
       this.timer = setTimeout(() => this.loop(), Math.max(50, 150 - (performance.now() - t0)));
     } else {
       this.timer = setTimeout(() => this.loop(), 120);
@@ -918,7 +961,7 @@ $('#optSplit').addEventListener('change', async (e) => {
   await Editor.save();
   Editor.open(p.id);
 });
-$('#editRotate').addEventListener('click', () => { Editor.page.rotation = ((Editor.page.rotation || 0) + 90) % 360; Editor.save(); });
+$('#editRotate').addEventListener('click', () => { Editor.page.rotation = ((Editor.page.rotation || 0) + 90) % 360; Editor.page.oriented = true; Editor.save(); });
 async function movePage(delta) {
   const doc = await DB.get('docs', Editor.page.docId);
   const i = doc.pageIds.indexOf(Editor.page.id), j = i + delta;
@@ -1034,7 +1077,8 @@ const Export = {
   async share() {
     const files = this.files; if (!files) return;
     if (navigator.canShare && navigator.canShare({ files })) {
-      try { await navigator.share({ files, title: files[0].name }); return; } catch (err) { if (err.name === 'AbortError') return; }
+      // title を付けると iPhone ではタイトルだけのテキストファイルも一緒に保存されてしまう
+      try { await navigator.share({ files }); return; } catch (err) { if (err.name === 'AbortError') return; }
     }
     for (const f of files) {
       const a = document.createElement('a');
