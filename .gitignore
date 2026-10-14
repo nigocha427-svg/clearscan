@@ -1,0 +1,4 @@
+*.json
+!manifest.webmanifest
+.DS_Store
+Thumbs.db
