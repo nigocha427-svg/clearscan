@@ -23,7 +23,7 @@ const catOf = (id) => CATS.find((c) => c.id === id) || CATS[0];
 // Google Drive 連携用の OAuth クライアント ID(秘密情報ではない。許可したアドレスとテストユーザーでのみ使える)
 const DRIVE_CLIENT_ID = '326536145882-7i0ok3eu1284027088s3q27sjbi0laps.apps.googleusercontent.com';
 const DEFAULTS = {
-  autoCapture: true, shutterSound: true, category: 'doc', quality: '0.85', maxSide: '2400',
+  autoCapture: true, shutterSound: true, facing: 'environment', category: 'doc', quality: '0.85', maxSide: '2400',
   driveFolder: 'ClearScan', driveFolderId: '', theme: 'auto', exportFormat: 'pdf',
 };
 const S = (() => {
@@ -443,13 +443,17 @@ const Cam = {
     if (docId) { const d = await DB.get('docs', docId); if (d) this.cat = d.category; }
     else this.cat = S.category;
     this.renderCats(); this.renderAuto(); this.updateThumb(null);
+    await this.openStream();
+  },
+  // カメラの映像を開く(前面・背面の切り替えでも使う)
+  async openStream() {
     $('#camMsg').classList.remove('show');
     this.status('カメラを起動中…');
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
+        video: { facingMode: { ideal: S.facing }, width: { ideal: 3840 }, height: { ideal: 2160 } },
       });
       if (state.screen !== 'camera') { this.stop(); return; }
       const v = $('#camVideo');
@@ -458,6 +462,8 @@ const Cam = {
       this.track = this.stream.getVideoTracks()[0];
       const caps = this.track.getCapabilities ? this.track.getCapabilities() : {};
       $('#camTorch').hidden = !caps.torch;
+      this.torch = false; $('#camTorch').classList.remove('on');
+      $('#camFlip').classList.toggle('on', S.facing === 'user');
       this.running = true;
       this.loop();
     } catch (err) {
@@ -631,6 +637,19 @@ $('#camCats').addEventListener('click', async (e) => {
 });
 $('#camSplit').addEventListener('click', () => { Cam.split = !Cam.split; Cam.renderCats(); });
 $('#camAuto').addEventListener('click', () => { S.autoCapture = !S.autoCapture; saveSettings(); Cam.renderAuto(); toast(S.autoCapture ? '自動撮影をオンにしました' : '自動撮影をオフにしました'); });
+// 前面(インカメラ)と背面のカメラを切り替える。撮影済みのページはそのまま
+$('#camFlip').addEventListener('click', async () => {
+  if (Cam.busy) return;
+  S.facing = S.facing === 'user' ? 'environment' : 'user';
+  saveSettings();
+  Cam.running = false;
+  clearTimeout(Cam.timer);
+  if (Cam.stream) Cam.stream.getTracks().forEach((t) => t.stop());
+  Cam.stream = null; Cam.track = null;
+  Cam.quad = null; Cam.prevBlocks = null; Cam.stillSince = 0;
+  await Cam.openStream();
+  toast(S.facing === 'user' ? '前面カメラに切り替えました' : '背面カメラに切り替えました');
+});
 $('#camTorch').addEventListener('click', async () => {
   if (!Cam.track) return;
   Cam.torch = !Cam.torch;

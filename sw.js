@@ -1,5 +1,5 @@
 /* ClearScan — オフライン対応 */
-const CACHE = 'clearscan-v10';
+const CACHE = 'clearscan-v11';
 const SHELL = ['./', 'index.html', 'app.js', 'imaging.js', 'worker.js', 'pdf.js', 'drive.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
